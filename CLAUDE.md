@@ -75,6 +75,10 @@ Every endpoint MUST have a ROLE via `#[IsGranted]` or Voter. Use role hierarchy 
 - Repository adapters in `Infrastructure/{Module}/Persistence/`
 - Entity mapping via XML or attribute in Infrastructure — NEVER annotations in Domain entities
 - Ask user preference for migration strategy (manual vs auto-diff)
+- **NEVER use native/raw SQL** — no `$connection->executeQuery()`, `$connection->executeStatement()`, `NativeQuery`, `$connection->prepare()`, or raw SQL strings in application code
+- Always use Doctrine QueryBuilder (ORM or DBAL), DQL, Repository finder methods, or Criteria API
+- **Only exception**: Doctrine Migrations (`$this->addSql()`) — the migration API requires raw SQL by design
+- When reviewing or generating code, flag any native SQL usage as a CRITICAL violation
 
 ## Directory Structure (per module)
 
@@ -96,3 +100,4 @@ When generating code, verify:
 - [ ] Endpoints have ROLE authorization
 - [ ] DTOs used at boundaries
 - [ ] Tests follow src/ mirror structure
+- [ ] No native/raw SQL in application code (only QueryBuilder, DQL, Criteria)

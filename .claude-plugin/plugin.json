@@ -1,6 +1,6 @@
 {
   "name": "symfony-hexagonal-skill",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Enforces hexagonal architecture (ports & adapters) patterns in Symfony projects. Provides skills for domain modeling, CQRS, API standardization, async messaging, security, and testing — all aligned with strict layer separation rules.",
   "author": "Ali Gundogdu",
   "keywords": [

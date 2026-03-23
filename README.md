@@ -23,19 +23,61 @@ No slash commands needed — skills and agents activate automatically based on c
 
 ## Installation
 
-Add the plugin to your Claude Code environment:
+### Option 1: Install from GitHub (Recommended)
+
+Clone the plugin repository and install it globally so it's available across all your Symfony projects:
 
 ```bash
+# Clone the repository
+git clone https://github.com/aligundogdu/symfony-hexagonal-skill.git
+
+# Install the plugin globally
 claude plugin add /path/to/symfony-hexagonal-skill
 ```
 
-For local development and testing:
+Once installed globally, the plugin activates automatically whenever you open Claude Code in any Symfony project directory.
+
+### Option 2: Add Directly to a Project
+
+If you prefer to bundle the plugin with a specific project (useful for teams where everyone should use the same architectural rules):
 
 ```bash
-claude --plugin-dir ./symfony-hexagonal-skill
+# Clone into your project root
+git clone https://github.com/aligundogdu/symfony-hexagonal-skill.git .claude-plugin
+
+# Or copy from an existing clone
+cp -r /path/to/symfony-hexagonal-skill .claude-plugin
 ```
 
-Once installed, the plugin activates automatically whenever you work on a Symfony project. There are no slash commands to remember — just describe what you need, and the relevant skills will engage.
+Then add `.claude-plugin/` to your project's `.gitignore` — or commit it if you want the entire team to share the same rules:
+
+```bash
+# Option A: Keep it local (add to .gitignore)
+echo ".claude-plugin/" >> .gitignore
+
+# Option B: Commit it (shared across the team)
+git add .claude-plugin/
+git commit -m "Add hexagonal architecture Claude Code plugin"
+```
+
+### Option 3: Local Development / Testing
+
+If you're contributing to the plugin or want to try it before committing:
+
+```bash
+# Run Claude Code with the plugin loaded from a local directory
+claude --plugin-dir /path/to/symfony-hexagonal-skill
+```
+
+### Verify Installation
+
+After installation, start Claude Code in your project directory and ask:
+
+```
+> Analyze the project structure for hexagonal architecture compliance
+```
+
+If the plugin is loaded correctly, the **hexagonal-architect** agent will scan your project and return a compliance report. No additional setup required — skills activate automatically based on conversation context.
 
 ---
 
@@ -198,6 +240,7 @@ Side-effects (sending emails, updating caches, notifying systems) are triggered 
 - **Security**: Every endpoint requires `#[IsGranted]` or a Voter
 - **Quality**: PHPStan level 8+, DTOs at every boundary, 3-layer validation
 - **Async resilience**: Idempotency keys, retry with backoff, failure transport
+- **No native SQL**: Raw/native SQL is forbidden in application code. Use Doctrine QueryBuilder (ORM or DBAL), DQL, or Criteria API. Only Doctrine Migrations may use `$this->addSql()`
 
 ---
 

@@ -35,6 +35,15 @@ Use `grep` to scan for forbidden imports:
 grep -rn "use Symfony\\\|use Doctrine\\\|use App\\\\Application\\\|use App\\\\Infrastructure\\\|use App\\\\Presentation" src/Domain/ || echo "CLEAN"
 ```
 
+### 2b. Native SQL Detection
+Scan for native/raw SQL usage (CRITICAL violation):
+```bash
+# Detect native SQL patterns — forbidden everywhere except migrations
+grep -rn "executeQuery\|executeStatement\|createNativeQuery\|ResultSetMapping\|->prepare(" src/ --include="*.php" | grep -v "migrations/" | grep -v "Migrations/" || echo "CLEAN"
+grep -rn "fetchAllAssociative(\s*'\|fetchOne(\s*'" src/ --include="*.php" | grep -v "migrations/" | grep -v "Migrations/" || echo "CLEAN"
+```
+Any match is a CRITICAL violation. Developers must use QueryBuilder (ORM or DBAL), DQL, finder methods, or Criteria API.
+
 ### 3. Module Architecture Design
 When asked to design a new module:
 - Identify entities, value objects, and aggregates

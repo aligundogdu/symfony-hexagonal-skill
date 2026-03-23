@@ -121,6 +121,19 @@ grep -rn "public function" src/Presentation/*/API/*.php | grep -v "IsGranted"
 grep -rn "@ORM\\\|#\[ORM\\\|@Column\|@Entity\|@Table" src/Domain/
 ```
 
+#### Native/Raw SQL Usage (CRITICAL)
+```bash
+# Detect native SQL — these patterns are NEVER allowed in application code
+grep -rn "executeQuery\|executeStatement\|createNativeQuery\|ResultSetMapping\|->prepare(\|->exec(" src/Application/ src/Infrastructure/ src/Presentation/ --include="*.php"
+# Exclude migration files (migrations are the only exception)
+grep -rn "executeQuery\|executeStatement\|createNativeQuery\|ResultSetMapping\|->prepare(" src/ --include="*.php" | grep -v "migrations/" | grep -v "Migrations/"
+# Also check for raw SQL string patterns passed to connection methods
+grep -rn "fetchAllAssociative(\s*'" src/ --include="*.php" | grep -v "migrations/" | grep -v "Migrations/"
+grep -rn "fetchOne(\s*'" src/ --include="*.php" | grep -v "migrations/" | grep -v "Migrations/"
+```
+
+**Violation**: Any native SQL usage outside of Doctrine Migrations is CRITICAL. Developers must use QueryBuilder (ORM or DBAL), DQL, finder methods, or Criteria API instead.
+
 #### Missing DTOs (WARNING)
 ```bash
 # Query handlers returning entities instead of DTOs
@@ -165,7 +178,7 @@ grep -rn "return \$this->.*repository->find" src/Application/*/Query/*Handler.ph
 
 | Severity | When to Use | Examples |
 |----------|-------------|---------|
-| CRITICAL | Core rule violation, must fix | Doctrine import in Domain, missing IsGranted, direct DB access in controller |
+| CRITICAL | Core rule violation, must fix | Doctrine import in Domain, missing IsGranted, direct DB access in controller, native/raw SQL usage |
 | WARNING | Standard deviation, should fix | Non-final command, side-effect in handler, missing DTO |
 | INFO | Improvement suggestion | Naming convention, missing test, code style |
 

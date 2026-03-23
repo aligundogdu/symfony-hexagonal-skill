@@ -19,6 +19,7 @@ You are an expert in Doctrine ORM within Symfony hexagonal architecture.
 2. **Mapping in Infrastructure**: Use XML or separate mapping files in `Infrastructure/{Module}/Persistence/Mapping/`
 3. **Repository = Adapter**: Implements domain port interface
 4. **Event dispatch after persist**: Repository dispatches domain events after flush
+5. **NEVER use native/raw SQL**: No `$connection->executeQuery()`, `$connection->executeStatement()`, `NativeQuery`, `$connection->prepare()`, or raw SQL strings anywhere in application code. Always use Doctrine QueryBuilder (ORM or DBAL), DQL, finder methods, or Criteria API. The only exception is Doctrine Migrations (`$this->addSql()`) which requires raw SQL by design.
 
 ## Repository Adapter Pattern
 
@@ -88,9 +89,40 @@ final readonly class Doctrine{Entity}Repository implements {Entity}RepositoryInt
 1. **Auto-diff**: `php bin/console doctrine:migrations:diff` (generates from mapping)
 2. **Manual**: Write migrations by hand for full control
 
+## Why No Native SQL?
+
+Native/raw SQL bypasses Doctrine's abstraction layers and creates several problems:
+- **Database portability lost** — Raw SQL ties code to a specific database engine (MySQL, PostgreSQL, etc.)
+- **No type safety** — QueryBuilder provides parameter binding with type inference, raw SQL doesn't
+- **Mapping bypass** — Entities, value objects, and custom types are ignored when using raw SQL
+- **Harder to maintain** — SQL strings scattered in code are harder to refactor than QueryBuilder chains
+- **Security risk** — Raw SQL increases the surface for SQL injection if parameters are not properly bound
+
+### Detecting Native SQL (for code review)
+
+Flag these patterns as CRITICAL violations:
+```php
+// FORBIDDEN — native SQL patterns
+$connection->executeQuery('SELECT ...');
+$connection->executeStatement('INSERT ...');
+$connection->prepare('SELECT ...');
+$connection->exec('DROP ...');
+$entityManager->getConnection()->executeQuery(...);
+$entityManager->createNativeQuery(...);
+$rsm = new ResultSetMapping();
+
+// ALLOWED — Doctrine abstractions
+$queryBuilder->select(...)->from(...)->where(...);    // DBAL QueryBuilder
+$entityManager->createQueryBuilder()->select('u')...;  // ORM QueryBuilder
+$entityManager->createQuery('SELECT u FROM User u');    // DQL
+$repository->findBy([...]);                             // Finder methods
+$repository->matching($criteria);                       // Criteria API
+```
+
 ## References
 
 See `references/` for detailed guides:
 - `repository-patterns.md` — Repository patterns and transaction management
 - `mapping-patterns.md` — XML mapping, embeddables, relations
 - `migration-workflow.md` — Migration strategies and best practices
+- `no-native-sql.md` — Why native SQL is forbidden and how to use QueryBuilder instead
