@@ -23,50 +23,45 @@ No slash commands needed — skills and agents activate automatically based on c
 
 ## Installation
 
-### Option 1: Install from GitHub (Recommended)
+### Option 1: Add to a Specific Project (Recommended)
 
-Clone the plugin repository and install it globally so it's available across all your Symfony projects:
+Copy the skills, agents, and architecture rules into your Symfony project's `.claude/` directory:
 
 ```bash
 # Clone the repository
-git clone https://github.com/aligundogdu/symfony-hexagonal-skill.git
+git clone https://github.com/aligundogdu/symfony-hexagonal-skill.git /tmp/hex-skill
 
-# Install the plugin globally
-claude plugin add /path/to/symfony-hexagonal-skill
+# Create the required directories in your project
+mkdir -p your-project/.claude/skills your-project/.claude/agents
+
+# Copy skills and agents
+cp -r /tmp/hex-skill/skills/* your-project/.claude/skills/
+cp -r /tmp/hex-skill/agents/* your-project/.claude/agents/
+
+# Add architecture rules to your project's CLAUDE.md
+cat /tmp/hex-skill/CLAUDE.md >> your-project/CLAUDE.md
+
+# Clean up
+rm -rf /tmp/hex-skill
 ```
 
-Once installed globally, the plugin activates automatically whenever you open Claude Code in any Symfony project directory.
+You can commit the `.claude/skills/` and `.claude/agents/` directories so the entire team shares the same rules, or add them to `.gitignore` to keep it local.
 
-### Option 2: Add Directly to a Project
+### Option 2: Symlink (for Development / Multi-Project Use)
 
-If you prefer to bundle the plugin with a specific project (useful for teams where everyone should use the same architectural rules):
-
-```bash
-# Clone into your project root
-git clone https://github.com/aligundogdu/symfony-hexagonal-skill.git .claude-plugin
-
-# Or copy from an existing clone
-cp -r /path/to/symfony-hexagonal-skill .claude-plugin
-```
-
-Then add `.claude-plugin/` to your project's `.gitignore` — or commit it if you want the entire team to share the same rules:
+If you want to use the plugin across multiple projects without copying:
 
 ```bash
-# Option A: Keep it local (add to .gitignore)
-echo ".claude-plugin/" >> .gitignore
+# Clone once
+git clone https://github.com/aligundogdu/symfony-hexagonal-skill.git ~/symfony-hexagonal-skill
 
-# Option B: Commit it (shared across the team)
-git add .claude-plugin/
-git commit -m "Add hexagonal architecture Claude Code plugin"
-```
+# In each Symfony project, symlink the skills and agents
+mkdir -p .claude
+ln -s ~/symfony-hexagonal-skill/skills .claude/skills
+ln -s ~/symfony-hexagonal-skill/agents .claude/agents
 
-### Option 3: Local Development / Testing
-
-If you're contributing to the plugin or want to try it before committing:
-
-```bash
-# Run Claude Code with the plugin loaded from a local directory
-claude --plugin-dir /path/to/symfony-hexagonal-skill
+# Copy CLAUDE.md rules into your project (merge manually if you already have one)
+cp ~/symfony-hexagonal-skill/CLAUDE.md ./CLAUDE.md
 ```
 
 ### Verify Installation
@@ -77,7 +72,7 @@ After installation, start Claude Code in your project directory and ask:
 > Analyze the project structure for hexagonal architecture compliance
 ```
 
-If the plugin is loaded correctly, the **hexagonal-architect** agent will scan your project and return a compliance report. No additional setup required — skills activate automatically based on conversation context.
+If installed correctly, the **hexagonal-architect** agent will scan your project and return a compliance report. Skills activate automatically based on conversation context - no slash commands needed.
 
 ---
 
