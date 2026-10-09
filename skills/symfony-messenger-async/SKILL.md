@@ -1,5 +1,6 @@
 ---
-description: "Symfony Messenger async processing — message queues, retry strategies, failure transport, Symfony Scheduler, idempotency patterns, background jobs. Triggers on: messenger, async, queue, retry, scheduler, background job, worker, transport, message queue, cron, scheduled task"
+name: symfony-messenger-async
+description: "Symfony Messenger async processing and Symfony Scheduler instead of cron: transports, routing (#[AsMessage] 7.2+), retry with backoff and jitter, failure transport, idempotency keys, DeduplicateStamp (7.3+), workers, supervisor, scheduled commands with stateful/locked schedules. Use when: messenger, async, queue, retry, scheduler, background job, worker, transport, message queue, cron, scheduled task, idempotency, deduplication"
 ---
 
 # Symfony Messenger & Async Processing
@@ -18,12 +19,26 @@ You are an expert in async message processing with Symfony Messenger within hexa
 
 **Never use raw cron.** Always use:
 - **Symfony Messenger** for async message processing
-- **Symfony Scheduler** for recurring tasks
+- **Symfony Scheduler** for recurring tasks (dispatching regular CQRS commands)
+
+## Version Notes
+
+| Feature | Requires | Fallback |
+|---|---|---|
+| Scheduler component, `RecurringMessage` | Symfony 6.3 | - (no cron) |
+| `#[AsCronTask]`, `#[AsPeriodicTask]` | Symfony 6.4 | `ScheduleProviderInterface` |
+| `retry_strategy.jitter` | Symfony 7.1 | omit |
+| `#[AsMessage('async')]` routing attribute | Symfony 7.2 | YAML `routing:` |
+| `DeduplicateStamp` (+ symfony/lock) | Symfony 7.3 | idempotency key + unique constraint |
+| `messenger:consume --keepalive` | Symfony 7.2/7.3 (transport dependent) | shorter `--time-limit` |
+| `#[AsMessageHandler(sign: true)]` message signing | Symfony 7.4 | trusted transport |
+| `messenger:consume --all --exclude-receivers=failed` | Symfony 7.4 | list receivers explicitly |
+| `#[AsMessage(serializedTypeName: ...)]`, `PriorityStamp`, regex receiver names | Symfony 8.1 | FQCN type names, separate priority transports |
 
 ## Async Command Pattern
 
 ```php
-// The command is the same — async is a routing concern, not a code concern
+// The command is the same: async is a routing concern, not a code concern
 namespace App\Application\Report\Command;
 
 final readonly class GenerateReport
@@ -36,7 +51,7 @@ final readonly class GenerateReport
     }
 }
 
-// Handler is identical to sync — the bus handles async dispatch
+// Handler is identical to sync: the bus handles async dispatch
 #[AsMessageHandler(bus: 'command.bus')]
 final readonly class GenerateReportHandler
 {
@@ -48,45 +63,51 @@ final readonly class GenerateReportHandler
 ```
 
 ```yaml
-# Route to async transport
+# Route to async transport (all versions)
 framework:
     messenger:
         routing:
             'App\Application\Report\Command\GenerateReport': async
 ```
 
+Symfony 7.2+: `#[AsMessage('async')]` on the command class works too. Never put it on **domain events**: Domain must stay free of Symfony attributes, so events are always routed in YAML.
+
 ## Idempotency
 
-Every async handler MUST be idempotent — safe to retry:
+Every async handler MUST be idempotent: messages can be delivered more than once (retries, worker crashes, redeliveries).
 
 ```php
 #[AsMessageHandler(bus: 'command.bus')]
 final readonly class ProcessPaymentHandler
 {
     public function __construct(
-        private PaymentRepositoryInterface $paymentRepository,
-        private PaymentGatewayInterface $paymentGateway,
+        private PaymentRepositoryInterface $payments,
+        private PaymentGatewayInterface $gateway,
     ) {
     }
 
     public function __invoke(ProcessPayment $command): void
     {
-        // Check if already processed (idempotency)
-        $existing = $this->paymentRepository->findByIdempotencyKey($command->idempotencyKey);
-        if ($existing !== null) {
+        if ($this->payments->existsByIdempotencyKey($command->idempotencyKey)) {
             return; // Already processed, skip
         }
 
-        // Process payment
-        $result = $this->paymentGateway->charge($command->customerId, $command->amount);
-        $this->paymentRepository->save($result);
+        $result = $this->gateway->charge(
+            $command->customerId,
+            new Money($command->amount, $command->currency),
+            sprintf('Order %s', $command->orderId),
+            $command->idempotencyKey, // the provider deduplicates too
+        );
+        $this->payments->record($command->orderId, $result, $command->idempotencyKey);
     }
 }
 ```
 
+Symfony 7.3+ adds `DeduplicateStamp`, which prevents the **same message from being queued twice** while one is pending. It complements, but does not replace, handler idempotency (see `references/idempotency-patterns.md`).
+
 ## References
 
 See `references/` for detailed guides:
-- `messenger-config.md` — Full Messenger YAML configuration
-- `idempotency-patterns.md` — Idempotency key strategies
-- `scheduler-patterns.md` — Symfony Scheduler setup and patterns
+- `messenger-config.md` - Full Messenger YAML configuration, workers, failure transport
+- `idempotency-patterns.md` - Idempotency key strategies, DeduplicateStamp
+- `scheduler-patterns.md` - Symfony Scheduler setup and patterns

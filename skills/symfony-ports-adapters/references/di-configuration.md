@@ -1,5 +1,7 @@
 # Dependency Injection Configuration
 
+All YAML below works on Symfony 6.4, 7.x and 8.x. Symfony 8 removed XML service configuration: use YAML (recommended) or the 7.4+ PHP array format.
+
 ## Basic Port-to-Adapter Binding
 
 ```yaml
@@ -9,19 +11,19 @@ services:
         autowire: true
         autoconfigure: true
         bind:
-            $commandBus: '@command.bus'
-            $queryBus: '@query.bus'
             $eventBus: '@event.bus'
 
     # Auto-register all services
     App\:
         resource: '../src/'
         exclude:
+            - '../src/Kernel.php'
             - '../src/Domain/*/Entity/'
             - '../src/Domain/*/ValueObject/'
             - '../src/Domain/*/Event/'
             - '../src/Domain/*/Exception/'
-            - '../src/Kernel.php'
+            - '../src/Domain/*/ReadModel/'
+            - '../src/Application/*/DTO/'
 
     # Port → Adapter bindings
     App\Domain\User\Port\UserRepositoryInterface:
@@ -36,24 +38,28 @@ services:
 
 ## Environment-Specific Adapters
 
-Use different adapters per environment:
+Use `when@{env}` blocks in the same file (Symfony 5.3+):
 
 ```yaml
-# config/services.yaml (production default)
+# config/services.yaml
 services:
     App\Domain\Notification\Port\NotificationServiceInterface:
         alias: App\Infrastructure\Notification\ExternalService\SymfonyMailerAdapter
 
-# config/services_dev.yaml
-services:
-    App\Domain\Notification\Port\NotificationServiceInterface:
-        alias: App\Infrastructure\Notification\ExternalService\NullNotificationService
+when@dev:
+    services:
+        App\Domain\Notification\Port\NotificationServiceInterface:
+            alias: App\Infrastructure\Notification\ExternalService\NullNotificationService
 
-# config/services_test.yaml
-services:
-    App\Domain\User\Port\UserRepositoryInterface:
-        alias: Tests\Support\Adapter\InMemoryUserRepository
+when@test:
+    services:
+        Tests\Support\Adapter\InMemoryUserRepository: ~
+        App\Domain\User\Port\UserRepositoryInterface:
+            alias: Tests\Support\Adapter\InMemoryUserRepository
+            public: true   # lets functional tests fetch and inspect it
 ```
+
+Symfony 7.3+ attribute alternative on the test adapter: `#[AsAlias(UserRepositoryInterface::class, when: 'test')]`.
 
 ## Adapter with Configuration
 
@@ -77,80 +83,77 @@ services:
             $bucket: '%env(AWS_S3_BUCKET)%'
 ```
 
+Attribute alternative (6.1+): `#[Autowire(env: 'MAILER_FROM')] private string $fromEmail` in the adapter constructor.
+
 ## Tagged Services (Multiple Adapters)
 
 When you need multiple implementations of the same port:
 
-```yaml
-services:
-    App\Infrastructure\Notification\ExternalService\EmailNotificationAdapter:
-        tags: ['app.notification_channel']
-
-    App\Infrastructure\Notification\ExternalService\SmsNotificationAdapter:
-        tags: ['app.notification_channel']
-
-    App\Infrastructure\Notification\ExternalService\CompositeNotificationService:
-        arguments:
-            $channels: !tagged_iterator 'app.notification_channel'
-```
-
-## Decorator Pattern
-
-```yaml
-services:
-    App\Infrastructure\User\Persistence\DoctrineUserRepository: ~
-
-    App\Infrastructure\User\Persistence\CachedUserRepository:
-        decorates: App\Infrastructure\User\Persistence\DoctrineUserRepository
-        arguments:
-            $inner: '@.inner'
-            $cache: '@cache.app'
-```
-
 ```php
-final readonly class CachedUserRepository implements UserRepositoryInterface
+use Symfony\Component\DependencyInjection\Attribute\AutoconfigureTag;
+use Symfony\Component\DependencyInjection\Attribute\AutowireIterator;
+
+#[AutoconfigureTag('app.notification_channel')]
+interface NotificationChannelInterface { /* Infrastructure-internal, so attributes are fine here */ }
+
+final readonly class CompositeNotificationService implements NotificationServiceInterface
 {
+    /** @param iterable<NotificationChannelInterface> $channels */
     public function __construct(
-        private UserRepositoryInterface $inner,
-        private CacheItemPoolInterface $cache,
+        #[AutowireIterator('app.notification_channel')] // Symfony 6.4+ (TaggedIterator before)
+        private iterable $channels,
     ) {
     }
-
-    public function findById(UserId $id): ?User
-    {
-        $cacheKey = 'user_' . $id->value;
-        $item = $this->cache->getItem($cacheKey);
-
-        if ($item->isHit()) {
-            return $item->get();
-        }
-
-        $user = $this->inner->findById($id);
-        if ($user !== null) {
-            $item->set($user)->expiresAfter(3600);
-            $this->cache->save($item);
-        }
-
-        return $user;
-    }
-
-    // delegate other methods to $this->inner
 }
 ```
 
-## Autowiring Interfaces
+YAML equivalent for any version: `$channels: !tagged_iterator 'app.notification_channel'`.
 
-For interfaces that have only one implementation, Symfony can autowire automatically:
+## Decorator Pattern (caching a read port)
 
-```yaml
-services:
-    # If there's only one class implementing UserRepositoryInterface,
-    # Symfony will autowire it automatically.
-    # Explicit alias is still recommended for clarity:
-    App\Domain\User\Port\UserRepositoryInterface: '@App\Infrastructure\User\Persistence\DoctrineUserRepository'
+Cache **read models**, not Doctrine-managed entities (cached entities come back detached and break the unit of work).
+
+```php
+namespace App\Infrastructure\User\Persistence;
+
+use App\Domain\Shared\ReadModel\Page;
+use App\Domain\User\Port\UserReadRepositoryInterface;
+use Symfony\Component\DependencyInjection\Attribute\AsDecorator;
+use Symfony\Component\DependencyInjection\Attribute\AutowireDecorated;
+use Symfony\Contracts\Cache\ItemInterface;
+use Symfony\Contracts\Cache\TagAwareCacheInterface;
+
+#[AsDecorator(decorates: DbalUserReadRepository::class)]
+final readonly class CachedUserReadRepository implements UserReadRepositoryInterface
+{
+    public function __construct(
+        #[AutowireDecorated]
+        private UserReadRepositoryInterface $inner,
+        private TagAwareCacheInterface $cache,
+    ) {
+    }
+
+    public function search(int $page, int $limit, ?string $status, ?string $search): Page
+    {
+        $key = 'users_' . md5(serialize([$page, $limit, $status, $search]));
+
+        return $this->cache->get($key, function (ItemInterface $item) use ($page, $limit, $status, $search): Page {
+            $item->expiresAfter(300);
+            $item->tag(['users']);
+
+            return $this->inner->search($page, $limit, $status, $search);
+        });
+    }
+}
 ```
 
-## Module-Scoped services.yaml
+Invalidate with an event handler (`WhenUserRegisteredInvalidateUserCache` → `$cache->invalidateTags(['users'])`). `TagAwareCacheInterface` needs a tag-aware pool (`cache.app.taggable`).
+
+## Autowiring Interfaces
+
+If exactly one service implements an interface, Symfony autowires it automatically. Still declare the alias explicitly: it documents the binding and fails loudly when a second implementation appears.
+
+## Module-Scoped Service Files
 
 For large projects, split configuration per module:
 

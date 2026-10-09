@@ -10,7 +10,7 @@ project-root/
 │   │   ├── security.yaml
 │   │   └── doctrine.yaml
 │   ├── services.yaml
-│   └── routes/
+│   └── routes.yaml
 ├── src/
 │   ├── Domain/
 │   │   └── {Module}/
@@ -22,26 +22,32 @@ project-root/
 │   │       │   └── {PastTenseEvent}.php
 │   │       ├── Exception/
 │   │       │   └── {DomainException}.php
-│   │       └── Port/
-│   │           └── {RepositoryInterface}.php
+│   │       ├── Port/
+│   │       │   ├── {Entity}RepositoryInterface.php
+│   │       │   └── {Entity}ReadRepositoryInterface.php
+│   │       └── ReadModel/
+│   │           └── {Entity}View.php
 │   ├── Application/
 │   │   └── {Module}/
 │   │       ├── Command/
 │   │       │   ├── {ActionCommand}.php
-│   │       │   └── {ActionCommandHandler}.php
+│   │       │   └── {ActionCommand}Handler.php
 │   │       ├── Query/
 │   │       │   ├── {GetQuery}.php
-│   │       │   └── {GetQueryHandler}.php
+│   │       │   └── {GetQuery}Handler.php
 │   │       ├── DTO/
-│   │       │   └── {DataDTO}.php
+│   │       │   └── {Data}DTO.php
 │   │       └── EventHandler/
-│   │           └── {WhenEventHandler}.php
+│   │           └── When{Event}{Action}.php
 │   ├── Infrastructure/
 │   │   └── {Module}/
 │   │       ├── Persistence/
 │   │       │   ├── Doctrine{Entity}Repository.php
+│   │       │   ├── Dbal{Entity}ReadRepository.php
 │   │       │   └── Mapping/
-│   │       │       └── {Entity}.orm.xml
+│   │       │       └── Entity.{Entity}.orm.xml
+│   │       ├── Security/
+│   │       │   └── {Entity}Voter.php
 │   │       ├── Messaging/
 │   │       │   └── {ExternalMessaging}.php
 │   │       └── ExternalService/
@@ -49,9 +55,11 @@ project-root/
 │   └── Presentation/
 │       └── {Module}/
 │           ├── API/
-│           │   └── {Entity}Controller.php
+│           │   ├── {Entity}Controller.php
+│           │   └── Request/
+│           │       └── {Action}Request.php
 │           ├── CLI/
-│           │   └── {ActionCommand}.php
+│           │   └── {Action}ConsoleCommand.php
 │           └── GraphQL/
 │               ├── Type/
 │               └── Resolver/
@@ -62,9 +70,12 @@ project-root/
 │   ├── Integration/
 │   │   └── Application/
 │   │       └── {Module}/
-│   └── Functional/
-│       └── Presentation/
-│           └── {Module}/
+│   ├── Functional/
+│   │   └── Presentation/
+│   │       └── {Module}/
+│   └── Support/
+│       └── Adapter/
+│           └── InMemory{Entity}Repository.php
 └── migrations/
 ```
 
@@ -72,13 +83,20 @@ project-root/
 
 ```
 src/
+├── Domain/Shared/
+│   ├── Event/DomainEvent.php
+│   ├── Port/IdGeneratorInterface.php
+│   └── ReadModel/Page.php
 ├── Domain/User/
 │   ├── Entity/User.php
 │   ├── ValueObject/Email.php
 │   ├── ValueObject/UserId.php
 │   ├── Event/UserRegistered.php
 │   ├── Exception/UserAlreadyExistsException.php
-│   └── Port/UserRepositoryInterface.php
+│   ├── Port/UserRepositoryInterface.php
+│   ├── Port/UserReadRepositoryInterface.php
+│   ├── Port/PasswordHasherInterface.php
+│   └── ReadModel/UserView.php
 ├── Application/User/
 │   ├── Command/RegisterUser.php
 │   ├── Command/RegisterUserHandler.php
@@ -86,15 +104,30 @@ src/
 │   ├── Query/GetUserByIdHandler.php
 │   ├── DTO/UserDTO.php
 │   └── EventHandler/WhenUserRegisteredSendWelcomeEmail.php
+├── Infrastructure/Shared/
+│   └── Identity/SymfonyUuidGenerator.php
 ├── Infrastructure/User/
 │   ├── Persistence/
 │   │   ├── DoctrineUserRepository.php
-│   │   └── Mapping/User.orm.xml
+│   │   ├── DbalUserReadRepository.php
+│   │   └── Mapping/
+│   │       ├── Entity.User.orm.xml
+│   │       └── ValueObject.Email.orm.xml
+│   ├── Security/
+│   │   ├── SecurityUser.php
+│   │   ├── SecurityUserProvider.php
+│   │   └── SymfonyPasswordHasher.php
 │   └── ExternalService/
-│       └── MailerAdapter.php
+│       └── MailerNotificationService.php
+├── Presentation/Shared/
+│   ├── ApiResponseTrait.php
+│   ├── Bus/CommandBus.php
+│   ├── Bus/QueryBus.php
+│   └── EventSubscriber/ApiExceptionSubscriber.php
 └── Presentation/User/
     ├── API/UserController.php
-    └── CLI/CreateUserCommand.php
+    ├── API/Request/RegisterUserRequest.php
+    └── CLI/CreateUserConsoleCommand.php
 ```
 
 ## Namespace Convention
@@ -106,6 +139,7 @@ namespace App\Domain\User\ValueObject;
 namespace App\Domain\User\Event;
 namespace App\Domain\User\Exception;
 namespace App\Domain\User\Port;
+namespace App\Domain\User\ReadModel;
 
 // Application
 namespace App\Application\User\Command;
@@ -115,6 +149,7 @@ namespace App\Application\User\EventHandler;
 
 // Infrastructure
 namespace App\Infrastructure\User\Persistence;
+namespace App\Infrastructure\User\Security;
 namespace App\Infrastructure\User\Messaging;
 namespace App\Infrastructure\User\ExternalService;
 
@@ -124,24 +159,52 @@ namespace App\Presentation\User\CLI;
 namespace App\Presentation\User\GraphQL;
 ```
 
-## services.yaml Module Binding
+## services.yaml (works on Symfony 6.4, 7.x, 8.x)
 
 ```yaml
 services:
-    # Auto-configure each layer
-    App\Domain\:
-        resource: '../src/Domain/'
+    _defaults:
+        autowire: true
+        autoconfigure: true
+        bind:
+            $eventBus: '@event.bus'
 
-    App\Application\:
-        resource: '../src/Application/'
-
-    App\Infrastructure\:
-        resource: '../src/Infrastructure/'
-
-    App\Presentation\:
-        resource: '../src/Presentation/'
+    App\:
+        resource: '../src/'
+        exclude:
+            - '../src/Kernel.php'
+            # Domain data classes are never services
+            - '../src/Domain/*/Entity/'
+            - '../src/Domain/*/ValueObject/'
+            - '../src/Domain/*/Event/'
+            - '../src/Domain/*/Exception/'
+            - '../src/Domain/*/ReadModel/'
+            - '../src/Application/*/DTO/'
+            - '../src/Presentation/*/API/Request/'
 
     # Bind ports to adapters
+    App\Domain\Shared\Port\IdGeneratorInterface:
+        alias: App\Infrastructure\Shared\Identity\SymfonyUuidGenerator
+
     App\Domain\User\Port\UserRepositoryInterface:
         alias: App\Infrastructure\User\Persistence\DoctrineUserRepository
+
+    App\Domain\User\Port\UserReadRepositoryInterface:
+        alias: App\Infrastructure\User\Persistence\DbalUserReadRepository
+
+    App\Domain\User\Port\PasswordHasherInterface:
+        alias: App\Infrastructure\User\Security\SymfonyPasswordHasher
+```
+
+Symfony 7.4+ alternative: `#[AsAlias(UserRepositoryInterface::class)]` on the adapter class (available since 6.3) keeps the binding next to the adapter. YAML aliases remain the most visible option and work everywhere.
+
+## Routes for Presentation Controllers
+
+```yaml
+# config/routes.yaml
+api:
+    resource:
+        path: ../src/Presentation/
+        namespace: App\Presentation
+    type: attribute
 ```

@@ -1,167 +1,195 @@
 # Exception Handling
 
-## ExceptionSubscriber
+## ApiExceptionSubscriber
 
-Catches all exceptions and converts them to the standard JSON payload:
+Converts every exception under `/api` into the standard JSON payload. Three details matter:
+
+1. **Unwrap Messenger**: exceptions thrown inside sync handlers arrive wrapped in `HandlerFailedException`. Without unwrapping, every domain error becomes a 500.
+2. **`#[MapRequestPayload]` failures** arrive as an `HttpException` (422) whose previous exception is a `ValidationFailedException`: read the violations from there.
+3. **Never leak internals**: 5xx responses get a generic message unless `kernel.debug` is true.
 
 ```php
 namespace App\Presentation\Shared\EventSubscriber;
 
+use App\Domain\User\Exception\UserAlreadyExistsException;
+use App\Domain\User\Exception\UserNotFoundException;
+use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpKernel\Event\ExceptionEvent;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Symfony\Component\HttpKernel\KernelEvents;
+use Symfony\Component\Messenger\Exception\HandlerFailedException;
+use Symfony\Component\Messenger\Exception\ValidationFailedException as MessengerValidationFailedException;
+use Symfony\Component\Security\Core\Exception\AccessDeniedException;
+use Symfony\Component\Security\Core\Exception\AuthenticationException;
+use Symfony\Component\Validator\ConstraintViolationListInterface;
+use Symfony\Component\Validator\Exception\ValidationFailedException;
 
 final readonly class ApiExceptionSubscriber implements EventSubscriberInterface
 {
+    /** Domain exception class => [HTTP status, error code] */
+    private const DOMAIN_MAP = [
+        UserNotFoundException::class => [404, 'USER_NOT_FOUND'],
+        UserAlreadyExistsException::class => [409, 'USER_ALREADY_EXISTS'],
+    ];
+
     public function __construct(
+        #[Autowire('%kernel.debug%')]
         private bool $debug,
     ) {
     }
 
     public static function getSubscribedEvents(): array
     {
-        return [
-            KernelEvents::EXCEPTION => ['onException', 0],
-        ];
+        // Priority above the security ExceptionListener (1) would hide 401 handling: stay at 0
+        return [KernelEvents::EXCEPTION => ['onException', 0]];
     }
 
     public function onException(ExceptionEvent $event): void
     {
-        $exception = $event->getThrowable();
-        $statusCode = $this->resolveStatusCode($exception);
-        $errorCode = $this->resolveErrorCode($exception);
-
-        $payload = [
-            'result' => null,
-            'error' => [
-                'code' => $errorCode,
-                'message' => $exception->getMessage(),
-            ],
-            'extra' => null,
-            'status' => $statusCode,
-        ];
-
-        if ($this->debug && $statusCode >= 500) {
-            $payload['extra'] = [
-                'debug' => [
-                    'exception' => get_class($exception),
-                    'file' => $exception->getFile(),
-                    'line' => $exception->getLine(),
-                    'trace' => $exception->getTraceAsString(),
-                ],
-            ];
+        if (!str_starts_with($event->getRequest()->getPathInfo(), '/api')) {
+            return; // HTML pages keep Symfony's error rendering
         }
 
-        $event->setResponse(new JsonResponse($payload, $statusCode));
+        $exception = $this->unwrap($event->getThrowable());
+        [$status, $code] = $this->resolve($exception);
+
+        $error = [
+            'code' => $code,
+            'message' => $status >= 500 && !$this->debug ? 'Internal server error' : $exception->getMessage(),
+        ];
+
+        $violations = $this->violations($exception);
+        if ($violations !== null) {
+            $error['message'] = 'Validation failed';
+            $error['details'] = $violations;
+        }
+
+        $extra = null;
+        if ($this->debug && $status >= 500) {
+            $extra = ['debug' => [
+                'exception' => $exception::class,
+                'file' => $exception->getFile(),
+                'line' => $exception->getLine(),
+                'trace' => $exception->getTraceAsString(),
+            ]];
+        }
+
+        $headers = $exception instanceof HttpExceptionInterface ? $exception->getHeaders() : [];
+
+        $event->setResponse(new JsonResponse(
+            ['result' => null, 'error' => $error, 'extra' => $extra, 'status' => $status],
+            $status,
+            $headers,
+        ));
     }
 
-    private function resolveStatusCode(\Throwable $exception): int
+    private function unwrap(\Throwable $exception): \Throwable
     {
+        while ($exception instanceof HandlerFailedException && $exception->getPrevious() !== null) {
+            $exception = $exception->getPrevious();
+        }
+
+        return $exception;
+    }
+
+    /** @return array{int, string} */
+    private function resolve(\Throwable $e): array
+    {
+        foreach (self::DOMAIN_MAP as $class => $mapping) {
+            if ($e instanceof $class) {
+                return $mapping;
+            }
+        }
+
         return match (true) {
-            $exception instanceof \DomainException => 422,
-            $exception instanceof \InvalidArgumentException => 400,
-            $exception instanceof AccessDeniedException => 403,
-            $exception instanceof NotFoundHttpException => 404,
-            $exception instanceof HttpExceptionInterface => $exception->getStatusCode(),
-            default => 500,
+            $this->violations($e) !== null => [422, 'VALIDATION_ERROR'],
+            $e instanceof AuthenticationException => [401, 'UNAUTHENTICATED'],
+            $e instanceof AccessDeniedException => [403, 'ACCESS_DENIED'],
+            $e instanceof HttpExceptionInterface => [$e->getStatusCode(), $this->httpCode($e->getStatusCode())],
+            $e instanceof \DomainException => [422, 'DOMAIN_ERROR'],
+            $e instanceof \InvalidArgumentException => [400, 'INVALID_ARGUMENT'],
+            default => [500, 'INTERNAL_ERROR'],
         };
     }
 
-    private function resolveErrorCode(\Throwable $exception): string
+    /** @return array<string, list<string>>|null */
+    private function violations(\Throwable $e): ?array
     {
-        return match (true) {
-            $exception instanceof \DomainException => 'DOMAIN_ERROR',
-            $exception instanceof \InvalidArgumentException => 'VALIDATION_ERROR',
-            $exception instanceof AccessDeniedException => 'ACCESS_DENIED',
-            $exception instanceof NotFoundHttpException => 'NOT_FOUND',
-            default => 'INTERNAL_ERROR',
+        $list = match (true) {
+            $e instanceof MessengerValidationFailedException => $e->getViolations(),
+            $e instanceof ValidationFailedException => $e->getViolations(),
+            // #[MapRequestPayload] / #[MapQueryString]: HttpException(422) with previous ValidationFailedException
+            $e->getPrevious() instanceof ValidationFailedException => $e->getPrevious()->getViolations(),
+            default => null,
+        };
+
+        if (!$list instanceof ConstraintViolationListInterface) {
+            return null;
+        }
+
+        $errors = [];
+        foreach ($list as $violation) {
+            $errors[$violation->getPropertyPath()][] = (string) $violation->getMessage();
+        }
+
+        return $errors;
+    }
+
+    private function httpCode(int $status): string
+    {
+        return match ($status) {
+            400 => 'BAD_REQUEST',
+            401 => 'UNAUTHENTICATED',
+            403 => 'ACCESS_DENIED',
+            404 => 'NOT_FOUND',
+            405 => 'METHOD_NOT_ALLOWED',
+            409 => 'CONFLICT',
+            415 => 'UNSUPPORTED_MEDIA_TYPE',
+            422 => 'UNPROCESSABLE_ENTITY',
+            429 => 'RATE_LIMITED',
+            default => $status >= 500 ? 'INTERNAL_ERROR' : 'HTTP_ERROR',
         };
     }
 }
 ```
 
-## Service Registration
+With `autoconfigure: true` no service definition is needed: `#[Autowire('%kernel.debug%')]` (Symfony 6.1+) injects the flag. On older setups bind `$debug: '%kernel.debug%'` in `services.yaml`.
+
+Importing `App\Domain\*\Exception\*` here is the one allowed Presentation → Domain dependency (see `dependency-rules.md`).
+
+## Unauthenticated Requests
+
+The firewall's entry point produces 401 responses before controllers run. Make them follow the payload too:
+
+```php
+namespace App\Presentation\Shared\Security;
+
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\Security\Core\Exception\AuthenticationException;
+use Symfony\Component\Security\Http\EntryPoint\AuthenticationEntryPointInterface;
+
+final class ApiAuthenticationEntryPoint implements AuthenticationEntryPointInterface
+{
+    public function start(Request $request, ?AuthenticationException $authException = null): JsonResponse
+    {
+        return new JsonResponse([
+            'result' => null,
+            'error' => ['code' => 'UNAUTHENTICATED', 'message' => 'Authentication required'],
+            'extra' => null,
+            'status' => 401,
+        ], 401);
+    }
+}
+```
 
 ```yaml
-# config/services.yaml
-services:
-    App\Presentation\Shared\EventSubscriber\ApiExceptionSubscriber:
-        arguments:
-            $debug: '%kernel.debug%'
-```
-
-## Domain Exception Mapping
-
-Map domain exceptions to specific HTTP status codes and error codes:
-
-```php
-namespace App\Presentation\Shared\EventSubscriber;
-
-use App\Domain\User\Exception\UserNotFoundException;
-use App\Domain\User\Exception\UserAlreadyExistsException;
-use App\Domain\Order\Exception\OrderAlreadyCancelledException;
-
-// In resolveStatusCode():
-private function resolveStatusCode(\Throwable $exception): int
-{
-    return match (true) {
-        $exception instanceof UserNotFoundException => 404,
-        $exception instanceof UserAlreadyExistsException => 409,
-        $exception instanceof OrderAlreadyCancelledException => 422,
-        // ... generic fallbacks
-        $exception instanceof \DomainException => 422,
-        default => 500,
-    };
-}
-
-// In resolveErrorCode():
-private function resolveErrorCode(\Throwable $exception): string
-{
-    return match (true) {
-        $exception instanceof UserNotFoundException => 'USER_NOT_FOUND',
-        $exception instanceof UserAlreadyExistsException => 'USER_ALREADY_EXISTS',
-        $exception instanceof OrderAlreadyCancelledException => 'ORDER_ALREADY_CANCELLED',
-        // ... generic fallbacks
-        $exception instanceof \DomainException => 'DOMAIN_ERROR',
-        default => 'INTERNAL_ERROR',
-    };
-}
-```
-
-## Validation Exception Handling
-
-For Symfony Validator constraint violations:
-
-```php
-use Symfony\Component\Validator\Exception\ValidationFailedException;
-use Symfony\Component\Messenger\Exception\ValidationFailedException as MessengerValidationFailed;
-
-// Add to resolveStatusCode():
-$exception instanceof ValidationFailedException => 422,
-$exception instanceof MessengerValidationFailed => 422,
-
-// Custom formatting for validation errors:
-private function formatValidationErrors(\Throwable $exception): ?array
-{
-    $violations = match (true) {
-        $exception instanceof MessengerValidationFailed => $exception->getViolations(),
-        $exception instanceof ValidationFailedException => $exception->getViolations(),
-        default => null,
-    };
-
-    if ($violations === null) {
-        return null;
-    }
-
-    $errors = [];
-    foreach ($violations as $violation) {
-        $field = $violation->getPropertyPath();
-        $errors[$field][] = $violation->getMessage();
-    }
-
-    return $errors;
-}
+# security.yaml
+firewalls:
+    api:
+        entry_point: App\Presentation\Shared\Security\ApiAuthenticationEntryPoint
 ```
 
 ## Rate Limiting Response

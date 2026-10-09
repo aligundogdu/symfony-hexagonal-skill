@@ -11,6 +11,7 @@ use App\Domain\User\ValueObject\Email;
 use App\Domain\User\ValueObject\UserId;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Messenger\MessageBusInterface;
+use Symfony\Component\Messenger\Stamp\DispatchAfterCurrentBusStamp;
 
 final readonly class DoctrineUserRepository implements UserRepositoryInterface
 {
@@ -26,7 +27,7 @@ final readonly class DoctrineUserRepository implements UserRepositoryInterface
         $this->entityManager->flush();
 
         foreach ($user->pullDomainEvents() as $event) {
-            $this->eventBus->dispatch($event);
+            $this->eventBus->dispatch($event, [new DispatchAfterCurrentBusStamp()]);
         }
     }
 
@@ -44,7 +45,7 @@ final readonly class DoctrineUserRepository implements UserRepositoryInterface
     public function existsByEmail(Email $email): bool
     {
         $qb = $this->entityManager->createQueryBuilder();
-        $count = $qb->select('COUNT(u.id)')
+        $count = (int) $qb->select('COUNT(u.id)')
             ->from(User::class, 'u')
             ->where('u.email.value = :email')
             ->setParameter('email', $email->value)
@@ -62,60 +63,32 @@ final readonly class DoctrineUserRepository implements UserRepositoryInterface
 }
 ```
 
-## Read-Optimized Repository (DBAL)
+## Read-Optimized Repository (DBAL QueryBuilder)
 
-For complex queries, use DBAL directly:
+Read ports return Domain read models (`Domain/{Module}/ReadModel/*View`) wrapped in the shared `Page<T>`; the adapter must not import Application DTOs (Infrastructure → Application is forbidden). Full example: cqrs-handlers `query-patterns.md` (`DbalUserReadRepository`).
+
+## ORM Pagination with Fetch Joins
+
+When a page must hydrate entities with joined collections, use Doctrine's paginator so LIMIT applies to root entities:
 
 ```php
-namespace App\Infrastructure\User\Persistence;
+use Doctrine\ORM\Tools\Pagination\Paginator; // ORM 2.x and 3.0-3.6
 
-use App\Application\Shared\DTO\PaginatedResult;
-use App\Application\User\DTO\UserDTO;
-use App\Domain\User\Port\UserReadRepositoryInterface;
-use Doctrine\DBAL\Connection;
+$query = $this->entityManager->createQueryBuilder()
+    ->select('o', 'i')
+    ->from(Order::class, 'o')
+    ->leftJoin('o.items', 'i')
+    ->orderBy('o.placedAt', 'DESC')
+    ->setFirstResult(($page - 1) * $limit)
+    ->setMaxResults($limit)
+    ->getQuery();
 
-final readonly class DbalUserReadRepository implements UserReadRepositoryInterface
-{
-    public function __construct(
-        private Connection $connection,
-    ) {
-    }
-
-    public function findPaginated(int $page, int $limit, ?string $status, ?string $search): PaginatedResult
-    {
-        $qb = $this->connection->createQueryBuilder()
-            ->select('id', 'email', 'name', 'status', 'created_at')
-            ->from('users');
-
-        if ($status !== null) {
-            $qb->andWhere('status = :status')->setParameter('status', $status);
-        }
-
-        if ($search !== null) {
-            $qb->andWhere('(name LIKE :search OR email LIKE :search)')
-                ->setParameter('search', '%' . $search . '%');
-        }
-
-        // Count total
-        $countQb = clone $qb;
-        $total = (int) $countQb->select('COUNT(*)')->fetchOne();
-
-        // Fetch page
-        $rows = $qb
-            ->orderBy('created_at', 'DESC')
-            ->setFirstResult(($page - 1) * $limit)
-            ->setMaxResults($limit)
-            ->fetchAllAssociative();
-
-        return new PaginatedResult(
-            items: array_map(fn (array $row) => UserDTO::fromRow($row), $rows),
-            total: $total,
-            page: $page,
-            limit: $limit,
-        );
-    }
-}
+$paginator = new Paginator($query, fetchJoinCollection: true);
+$total = count($paginator);
+$orders = iterator_to_array($paginator);
 ```
+
+Doctrine ORM 3.7+ deprecates `Paginator`: use `Doctrine\ORM\Tools\Pagination\OffsetPaginator` with a `Window` value object (offset + limit passed to `paginate()`, which returns an immutable, iterable page). Check the installed ORM version before choosing.
 
 ## Transaction Management
 
@@ -169,6 +142,7 @@ interface UserRepositoryInterface
 {
     public function save(User $user): void;
     public function findById(UserId $id): ?User;
+    /** @return list<User> */
     public function findMatching(UserSpecification $specification): array;
 }
 ```
@@ -178,7 +152,9 @@ namespace App\Infrastructure\User\Persistence;
 
 use Doctrine\ORM\QueryBuilder;
 
-final readonly class ActiveUsersSpecification
+// UserSpecification is a Domain interface/value object describing the criteria;
+// the adapter translates it into QueryBuilder conditions.
+final readonly class DoctrineActiveUsersSpecification
 {
     public function apply(QueryBuilder $qb): void
     {
@@ -192,13 +168,13 @@ final readonly class ActiveUsersSpecification
 
 ```php
 // In domain entity
-public function softDelete(): void
+public function softDelete(\DateTimeImmutable $now): void
 {
-    $this->deletedAt = new \DateTimeImmutable();
-    $this->recordEvent(new UserDeleted($this->id->value));
+    $this->deletedAt = $now;
+    $this->recordEvent(new UserDeleted($this->id->value, $now));
 }
 
-// In repository — filter out soft-deleted by default
+// In repository - filter out soft-deleted by default
 public function findById(UserId $id): ?User
 {
     return $this->entityManager->createQueryBuilder()

@@ -2,6 +2,13 @@
 
 This plugin enforces hexagonal architecture in Symfony projects. These rules apply to ALL code generation and review.
 
+## Version Awareness (Symfony 6.4 LTS, 7.4 LTS, 8.x)
+
+- Before generating code, know the installed Symfony / PHP / Doctrine / PHPUnit versions (the plugin prints a "Detected Stack" block; otherwise read `composer.lock`).
+- Default to code that runs on every supported version (PHP 8.2 + Symfony 6.4 APIs). Use newer features only when the detected versions allow it, and name the minimum version when you do.
+- Never generate APIs removed in Symfony 8: `Request::get()`, constraint option arrays (`new Assert\Length(['min' => 3])`), XML service/route config, Doctrine annotations.
+- The full matrix is in the `symfony-hexagonal-architecture` skill: `references/version-compatibility.md`.
+
 ## Progressive Refactoring Strategy
 
 **This plugin does NOT require rewriting an entire project at once.** When added to an existing Symfony project that doesn't follow hexagonal architecture:
@@ -12,7 +19,7 @@ This plugin enforces hexagonal architecture in Symfony projects. These rules app
    - "Bu modül henüz hexagonal yapıda değil. İsterseniz önce `{Module}` modülünü hexagonal mimariye taşıyıp sonra yeni özelliği ekleyeyim. Ya da mevcut yapıda devam edebilirim. Hangisini tercih edersiniz?"
    - Offer clear options: (a) refactor to hexagonal first, then add feature, (b) add feature in current structure, (c) add feature in hexagonal but leave existing code as-is
 4. **Refactor only the touched module**: Never refactor unrelated modules. Only the module the user is actively working on is a candidate.
-5. **Incremental migration path**: When user chooses refactoring, migrate one layer at a time — Domain first, then Application, then Infrastructure, finally Presentation.
+5. **Incremental migration path**: When user chooses refactoring, migrate one layer at a time - Domain first, then Application, then Infrastructure, finally Presentation.
 
 ### When to Ask
 - User wants to modify an existing controller/service/repository that isn't in hexagonal structure
@@ -28,15 +35,15 @@ This plugin enforces hexagonal architecture in Symfony projects. These rules app
 ## 4 Core Rules (NEVER violate)
 
 ### 1. Dependency Rule
-- `Domain/` has ZERO external dependencies — no Symfony, Doctrine, or third-party imports
-- Domain contains only pure PHP: entities, value objects, events, exceptions, port interfaces
-- Only `Application/` may depend on `Domain/`. Only `Infrastructure/` implements ports. Only `Presentation/` calls application services.
+- `Domain/` has ZERO external dependencies: no Symfony, Doctrine, PSR or third-party imports, and no framework attributes (`#[ORM\...]`, `#[Assert\...]`, `#[AsMessage]`)
+- Domain contains only pure PHP: entities, value objects, events, exceptions, port interfaces, read models
+- Only `Application/` may depend on `Domain/`. Only `Infrastructure/` implements ports. Only `Presentation/` calls application services (Presentation may import Domain *exceptions* for HTTP error mapping, nothing else from Domain).
 - Direction: Presentation → Application → Domain ← Infrastructure
 
 ### 2. Port/Adapter Enforcement
-- Every external interaction (DB, API, filesystem, email) MUST go through a port interface in `Domain/{Module}/Port/`
+- Every external interaction (DB, API, filesystem, email, ID generation, password hashing, clock) MUST go through a port interface in `Domain/{Module}/Port/` (shared ones in `Domain/Shared/Port/`)
 - Adapters implementing ports live in `Infrastructure/{Module}/`
-- Bind adapters to ports via `services.yaml` — never inject concrete adapters directly
+- Bind adapters to ports via `services.yaml` aliases (or `#[AsAlias]` on 6.3+), never inject concrete adapters directly
 
 ### 3. CQRS Separation
 - Commands: `final readonly class` in `Application/{Module}/Command/`, return void or ID
@@ -47,13 +54,17 @@ This plugin enforces hexagonal architecture in Symfony projects. These rules app
 ### 4. Event-Driven Side-Effects
 - Domain events: past-tense named, immutable, created within entities
 - Event handlers in `Application/{Module}/EventHandler/`
-- Side-effects (email, notifications, cache) triggered ONLY via events — never in command handlers
+- Side-effects (email, notifications, cache) triggered ONLY via events, never in command handlers
+- Repositories dispatch pulled events with `DispatchAfterCurrentBusStamp`, so they are released only after the command's transaction commits
+- Domain events are routed to async transports in `messenger.yaml` (never via attributes on the event class)
 
 ## Additional Standards
 
 ### API Response Format
 All API endpoints return: `{"result": mixed, "error": ?object, "extra": ?object, "status": int}`
-Debug details included only when `APP_DEBUG=true`.
+Debug details included only when `APP_DEBUG=true`; production 5xx responses use a generic message.
+- Controllers take input through `#[MapRequestPayload]` / `#[MapQueryString]` request DTOs (6.3+)
+- The exception subscriber unwraps Messenger's `HandlerFailedException` so domain errors map to 4xx, not 500
 
 ### No Cron Jobs
 Use Symfony Messenger async transport + Symfony Scheduler component. Never raw cron.
@@ -62,7 +73,7 @@ Use Symfony Messenger async transport + Symfony Scheduler component. Never raw c
 Every endpoint MUST have a ROLE via `#[IsGranted]` or Voter. Use role hierarchy in `security.yaml`. Complex authorization → Symfony Voter.
 
 ### Quality
-- PHPStan level 8+ mandatory
+- PHPStan level 8+ mandatory (PHPStan 2.x; 9-10 recommended for new code), deptrac enforces layer rules in CI
 - DTOs at every boundary (controller input, handler output, API response)
 - Validation at 3 layers: Presentation (input), Application (DTO), Domain (invariants)
 
@@ -73,20 +84,20 @@ Every endpoint MUST have a ROLE via `#[IsGranted]` or Voter. Use role hierarchy 
 
 ### Doctrine
 - Repository adapters in `Infrastructure/{Module}/Persistence/`
-- Entity mapping via XML or attribute in Infrastructure — NEVER annotations in Domain entities
+- Entity mapping via XML in `Infrastructure/{Module}/Persistence/Mapping/`: NEVER annotations or attributes on Domain entities
 - Ask user preference for migration strategy (manual vs auto-diff)
-- **NEVER use native/raw SQL** — no `$connection->executeQuery()`, `$connection->executeStatement()`, `NativeQuery`, `$connection->prepare()`, or raw SQL strings in application code
+- **NEVER use native/raw SQL** - no `$connection->executeQuery()`, `$connection->executeStatement()`, `NativeQuery`, `$connection->prepare()`, or raw SQL strings in application code
 - Always use Doctrine QueryBuilder (ORM or DBAL), DQL, Repository finder methods, or Criteria API
-- **Only exception**: Doctrine Migrations (`$this->addSql()`) — the migration API requires raw SQL by design
+- **Only exception**: Doctrine Migrations (`$this->addSql()`) - the migration API requires raw SQL by design
 - When reviewing or generating code, flag any native SQL usage as a CRITICAL violation
 
 ## Directory Structure (per module)
 
 ```
 src/
-├── Domain/{Module}/Entity/, ValueObject/, Event/, Exception/, Port/
+├── Domain/{Module}/Entity/, ValueObject/, Event/, Exception/, Port/, ReadModel/
 ├── Application/{Module}/Command/, Query/, DTO/, EventHandler/
-├── Infrastructure/{Module}/Persistence/, Messaging/, ExternalService/
+├── Infrastructure/{Module}/Persistence/, Security/, Messaging/, ExternalService/
 └── Presentation/{Module}/API/, CLI/, GraphQL/
 ```
 
@@ -101,3 +112,4 @@ When generating code, verify:
 - [ ] DTOs used at boundaries
 - [ ] Tests follow src/ mirror structure
 - [ ] No native/raw SQL in application code (only QueryBuilder, DQL, Criteria)
+- [ ] Every API used exists in the project's installed Symfony / Doctrine / PHPUnit versions

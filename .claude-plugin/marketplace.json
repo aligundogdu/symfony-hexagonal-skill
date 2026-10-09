@@ -1,0 +1,12 @@
+{
+  "name": "symfony-hexagonal-skill",
+  "owner": { "name": "Ali Gündoğdu" },
+  "description": "Symfony hexagonal architecture skills and agents for Claude Code",
+  "plugins": [
+    {
+      "name": "symfony-hexagonal",
+      "source": ".",
+      "description": "Hexagonal architecture rules, version-aware skills and review agents for Symfony 6.4 LTS, 7.x and 8.x"
+    }
+  ]
+}

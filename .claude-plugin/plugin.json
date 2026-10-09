@@ -1,0 +1,10 @@
+{
+  "name": "symfony-hexagonal",
+  "version": "2.0.0",
+  "description": "Hexagonal architecture (ports & adapters) for Symfony 6.4 LTS, 7.x and 8.x: version-aware skills for domain modeling, CQRS, Doctrine, Messenger/Scheduler, security, validation and testing, plus architect and reviewer agents.",
+  "author": { "name": "Ali Gündoğdu" },
+  "homepage": "https://github.com/aligundogdu/symfony-hexagonal-skill",
+  "repository": "https://github.com/aligundogdu/symfony-hexagonal-skill",
+  "license": "MIT",
+  "keywords": ["symfony", "php", "hexagonal-architecture", "ports-and-adapters", "ddd", "cqrs", "doctrine", "messenger"]
+}

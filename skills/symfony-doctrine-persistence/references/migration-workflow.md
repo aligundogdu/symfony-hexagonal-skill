@@ -22,6 +22,10 @@ php bin/console doctrine:migrations:generate
 # Write SQL manually for full control
 ```
 
+## Versions
+
+`doctrine/migrations` 3.x (latest 3.9) supports Symfony 6.4, 7.x and 8.x and DBAL 3/4. Migrations are the only place where raw SQL (`$this->addSql()`) is allowed.
+
 ## Migration Configuration
 
 ```yaml
@@ -99,12 +103,12 @@ php bin/console doctrine:migrations:list
 
 ## Best Practices
 
-1. **Never edit applied migrations** — Create a new migration instead
+1. **Never edit applied migrations** - Create a new migration instead
 2. **Always review auto-generated migrations** before applying
 3. **Write both `up()` and `down()`** for reversibility
 4. **Use descriptive `getDescription()`** for documentation
 5. **Test migrations** in CI/CD pipeline before production
-6. **Keep migrations atomic** — one logical change per migration
+6. **Keep migrations atomic** - one logical change per migration
 7. **Add data migrations** when schema changes require data transformation
 
 ## Data Migration Example
@@ -128,6 +132,6 @@ public function up(Schema $schema): void
 steps:
     - name: Run migrations
       run: |
-          php bin/console doctrine:migrations:migrate --no-interaction
-          php bin/console doctrine:schema:validate
+          php bin/console doctrine:migrations:migrate --no-interaction --all-or-nothing
+          php bin/console doctrine:schema:validate   # mapping valid AND in sync with the database
 ```

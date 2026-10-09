@@ -22,8 +22,51 @@ final readonly class RegisterUser
 
         #[Assert\NotBlank]
         #[Assert\Length(min: 8)]
-        public string $password,
+        #[\SensitiveParameter]
+        public string $plainPassword,
     ) {
+    }
+}
+```
+
+Always pass constraint options as named arguments (`Length(min: 2)`): option arrays are deprecated since Symfony 7.3 and removed in 8.0, while named arguments work on every supported version.
+
+### Password Hashing Port
+
+Hashing is an external concern, so the handler depends on a Domain port, not on `UserPasswordHasherInterface`:
+
+```php
+namespace App\Domain\User\Port;
+
+interface PasswordHasherInterface
+{
+    public function hash(string $plainPassword): string;
+
+    public function verify(string $hash, string $plainPassword): bool;
+}
+```
+
+```php
+namespace App\Infrastructure\User\Security;
+
+use App\Domain\User\Port\PasswordHasherInterface;
+use Symfony\Component\PasswordHasher\Hasher\PasswordHasherFactoryInterface;
+
+final readonly class SymfonyPasswordHasher implements PasswordHasherInterface
+{
+    public function __construct(
+        private PasswordHasherFactoryInterface $hasherFactory,
+    ) {
+    }
+
+    public function hash(string $plainPassword): string
+    {
+        return $this->hasherFactory->getPasswordHasher(SecurityUser::class)->hash($plainPassword);
+    }
+
+    public function verify(string $hash, string $plainPassword): bool
+    {
+        return $this->hasherFactory->getPasswordHasher(SecurityUser::class)->verify($hash, $plainPassword);
     }
 }
 ```
@@ -33,20 +76,22 @@ final readonly class RegisterUser
 ```php
 namespace App\Application\User\Command;
 
+use App\Domain\Shared\Port\IdGeneratorInterface;
 use App\Domain\User\Entity\User;
 use App\Domain\User\Exception\UserAlreadyExistsException;
+use App\Domain\User\Port\PasswordHasherInterface;
 use App\Domain\User\Port\UserRepositoryInterface;
 use App\Domain\User\ValueObject\Email;
 use App\Domain\User\ValueObject\UserId;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
-use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 
 #[AsMessageHandler(bus: 'command.bus')]
 final readonly class RegisterUserHandler
 {
     public function __construct(
         private UserRepositoryInterface $userRepository,
-        private UserPasswordHasherInterface $passwordHasher,
+        private PasswordHasherInterface $passwordHasher,
+        private IdGeneratorInterface $ids,
     ) {
     }
 
@@ -55,19 +100,25 @@ final readonly class RegisterUserHandler
         $email = new Email($command->email);
 
         if ($this->userRepository->existsByEmail($email)) {
-            throw UserAlreadyExistsException::withEmail($email);
+            throw UserAlreadyExistsException::withEmail($email->value);
         }
 
-        $userId = UserId::generate();
-        $hashedPassword = $this->passwordHasher->hashPassword(/* ... */);
-        $user = User::register($userId, $email, $command->name, $hashedPassword);
+        $user = User::register(
+            new UserId($this->ids->generate()),
+            $email,
+            $command->name,
+            $this->passwordHasher->hash($command->plainPassword),
+            new \DateTimeImmutable(),
+        );
 
         $this->userRepository->save($user);
 
-        return $userId->value;
+        return $user->id()->value;
     }
 }
 ```
+
+The `existsByEmail` check gives a friendly error; the unique index on `email` is what actually guarantees uniqueness under concurrency.
 
 ## Command That Updates
 
@@ -92,10 +143,8 @@ final readonly class UpdateUserProfileHandler
 
     public function __invoke(UpdateUserProfile $command): void
     {
-        $user = $this->userRepository->findById(new UserId($command->userId));
-        if ($user === null) {
-            throw UserNotFoundException::withId($command->userId);
-        }
+        $user = $this->userRepository->findById(new UserId($command->userId))
+            ?? throw UserNotFoundException::withId($command->userId);
 
         if ($command->name !== null) {
             $user->changeName($command->name);
@@ -109,7 +158,7 @@ final readonly class UpdateUserProfileHandler
 }
 ```
 
-## Command That Deletes
+## Command That Deactivates
 
 ```php
 final readonly class DeactivateUser
@@ -131,12 +180,10 @@ final readonly class DeactivateUserHandler
 
     public function __invoke(DeactivateUser $command): void
     {
-        $user = $this->userRepository->findById(new UserId($command->userId));
-        if ($user === null) {
-            throw UserNotFoundException::withId($command->userId);
-        }
+        $user = $this->userRepository->findById(new UserId($command->userId))
+            ?? throw UserNotFoundException::withId($command->userId);
 
-        $user->deactivate($command->reason);
+        $user->deactivate($command->reason, new \DateTimeImmutable());
         $this->userRepository->save($user);
     }
 }
@@ -145,26 +192,32 @@ final readonly class DeactivateUserHandler
 ## Dispatching Commands from Controllers
 
 ```php
-use Symfony\Component\Messenger\MessageBusInterface;
-use Symfony\Component\Messenger\Stamp\HandledStamp;
-
-// In controller:
-$envelope = $this->commandBus->dispatch(new RegisterUser($email, $name, $password));
-
-// Get return value if handler returns something:
-$handledStamp = $envelope->last(HandledStamp::class);
-$userId = $handledStamp->getResult();
+// Presentation\Shared\Bus\CommandBus returns the handler result and unwraps HandlerFailedException
+$userId = $this->commandBus->dispatch(new RegisterUser($email, $name, $password));
 ```
+
+If you must use `MessageBusInterface` directly: `$envelope->last(HandledStamp::class)?->getResult()` gives the result, and every handler exception arrives wrapped in `HandlerFailedException` (use `$e->getPrevious()`).
 
 ## Async Commands
 
-Some commands can be dispatched asynchronously:
+Some commands can be dispatched asynchronously. The handler code does not change.
 
 ```yaml
-# messenger.yaml
+# messenger.yaml (all versions)
 framework:
     messenger:
         routing:
             'App\Application\Report\Command\GenerateReport': async
             'App\Application\Email\Command\SendBulkEmail': async
 ```
+
+Symfony 7.2+ alternative, on the command class itself (Application may import Messenger):
+
+```php
+use Symfony\Component\Messenger\Attribute\AsMessage;
+
+#[AsMessage('async')]
+final readonly class GenerateReport { /* ... */ }
+```
+
+YAML routing wins when both are set. Async command handlers must be idempotent (see the messenger-async skill), and `CommandBus::dispatch()` returns `null` for them because nothing was handled yet: return `202` with an ID generated before dispatch instead.

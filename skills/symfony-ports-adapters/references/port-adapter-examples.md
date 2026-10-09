@@ -30,6 +30,7 @@ use App\Domain\User\ValueObject\Email;
 use App\Domain\User\ValueObject\UserId;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Messenger\MessageBusInterface;
+use Symfony\Component\Messenger\Stamp\DispatchAfterCurrentBusStamp;
 
 final readonly class DoctrineUserRepository implements UserRepositoryInterface
 {
@@ -45,7 +46,7 @@ final readonly class DoctrineUserRepository implements UserRepositoryInterface
         $this->entityManager->flush();
 
         foreach ($user->pullDomainEvents() as $event) {
-            $this->eventBus->dispatch($event);
+            $this->eventBus->dispatch($event, [new DispatchAfterCurrentBusStamp()]);
         }
     }
 
@@ -63,7 +64,8 @@ final readonly class DoctrineUserRepository implements UserRepositoryInterface
 
     public function existsByEmail(Email $email): bool
     {
-        return $this->findByEmail($email) !== null;
+        return $this->entityManager->getRepository(User::class)
+            ->count(['email.value' => $email->value]) > 0;
     }
 
     public function remove(User $user): void
@@ -84,9 +86,25 @@ use App\Domain\Shared\ValueObject\Money;
 
 interface PaymentGatewayInterface
 {
-    public function charge(string $customerId, Money $amount, string $description): PaymentResult;
+    public function charge(string $customerId, Money $amount, string $description, string $idempotencyKey): PaymentResult;
     public function refund(string $paymentId, ?Money $amount = null): RefundResult;
     public function createCustomer(string $email, string $name): string;
+}
+```
+
+Result objects returned by the port are plain Domain classes (no Stripe types leak out):
+
+```php
+namespace App\Domain\Payment\Port;
+
+final readonly class PaymentResult
+{
+    public function __construct(
+        public string $id,
+        public string $status,
+        public bool $success,
+    ) {
+    }
 }
 ```
 
@@ -97,7 +115,9 @@ namespace App\Infrastructure\Payment\ExternalService;
 use App\Domain\Payment\Port\PaymentGatewayInterface;
 use App\Domain\Payment\Port\PaymentResult;
 use App\Domain\Payment\Port\RefundResult;
+use App\Domain\Payment\Exception\PaymentGatewayUnavailableException;
 use App\Domain\Shared\ValueObject\Money;
+use Stripe\Exception\ApiErrorException;
 use Stripe\StripeClient;
 
 final readonly class StripePaymentGateway implements PaymentGatewayInterface
@@ -107,14 +127,18 @@ final readonly class StripePaymentGateway implements PaymentGatewayInterface
     ) {
     }
 
-    public function charge(string $customerId, Money $amount, string $description): PaymentResult
+    public function charge(string $customerId, Money $amount, string $description, string $idempotencyKey): PaymentResult
     {
-        $charge = $this->stripe->paymentIntents->create([
-            'amount' => $amount->amount,
-            'currency' => strtolower($amount->currency),
-            'customer' => $customerId,
-            'description' => $description,
-        ]);
+        try {
+            $charge = $this->stripe->paymentIntents->create([
+                'amount' => $amount->amount,
+                'currency' => strtolower($amount->currency),
+                'customer' => $customerId,
+                'description' => $description,
+            ], ['idempotency_key' => $idempotencyKey]); // safe to retry from async handlers
+        } catch (ApiErrorException $e) {
+            throw PaymentGatewayUnavailableException::because($e->getMessage(), $e);
+        }
 
         return new PaymentResult(
             id: $charge->id,
@@ -261,7 +285,8 @@ final class InMemoryUserRepository implements UserRepositoryInterface
 
     public function save(User $user): void
     {
-        $this->users[(string) $user->id()] = $user;
+        $this->users[$user->id()->value] = $user;
+        $user->pullDomainEvents(); // or keep them in a public $releasedEvents list to assert on
     }
 
     public function findById(UserId $id): ?User
@@ -286,7 +311,7 @@ final class InMemoryUserRepository implements UserRepositoryInterface
 
     public function remove(User $user): void
     {
-        unset($this->users[(string) $user->id()]);
+        unset($this->users[$user->id()->value]);
     }
 }
 ```

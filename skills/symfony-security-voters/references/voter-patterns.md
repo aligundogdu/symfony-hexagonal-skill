@@ -2,7 +2,7 @@
 
 ## Where Voters Live
 
-Voters are Infrastructure concerns — they live in `Infrastructure/{Module}/Security/`:
+Voters are Infrastructure concerns: they live in `Infrastructure/{Module}/Security/`:
 
 ```
 src/Infrastructure/Order/Security/OrderVoter.php
@@ -11,154 +11,171 @@ src/Infrastructure/Document/Security/DocumentVoter.php
 
 ## Full Voter Example: Order
 
+The subject is the order ID (from `#[IsGranted(..., subject: 'id')]`). The voter loads a read model through a Domain read port.
+
+```php
+namespace App\Domain\Order\ReadModel;
+
+final readonly class OrderAccessView
+{
+    public function __construct(
+        public string $orderId,
+        public string $customerId,
+        public string $status,
+    ) {
+    }
+}
+```
+
 ```php
 namespace App\Infrastructure\Order\Security;
 
-use App\Domain\Order\Entity\Order;
+use App\Domain\Order\Port\OrderReadRepositoryInterface;
+use App\Domain\Order\ReadModel\OrderAccessView;
 use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
+use Symfony\Component\Security\Core\Authorization\AccessDecisionManagerInterface;
+use Symfony\Component\Security\Core\Authorization\Voter\Vote;
 use Symfony\Component\Security\Core\Authorization\Voter\Voter;
-use Symfony\Component\Security\Core\User\UserInterface;
 
+/** @extends Voter<string, string> */
 final class OrderVoter extends Voter
 {
     public const VIEW = 'ORDER_VIEW';
     public const EDIT = 'ORDER_EDIT';
     public const CANCEL = 'ORDER_CANCEL';
 
-    protected function supports(string $attribute, mixed $subject): bool
-    {
-        return in_array($attribute, [self::VIEW, self::EDIT, self::CANCEL])
-            && $subject instanceof Order;
+    public function __construct(
+        private readonly OrderReadRepositoryInterface $orders,
+        private readonly AccessDecisionManagerInterface $accessDecisionManager,
+    ) {
     }
 
-    protected function voteOnAttribute(string $attribute, mixed $subject, TokenInterface $token): bool
+    protected function supports(string $attribute, mixed $subject): bool
     {
-        $user = $token->getUser();
-        if (!$user instanceof UserInterface) {
+        return in_array($attribute, [self::VIEW, self::EDIT, self::CANCEL], true)
+            && is_string($subject);
+    }
+
+    /**
+     * The 4th parameter exists since Symfony 7.3 and is part of the parent signature in 8.0.
+     * Declaring it keeps the voter compatible with 6.4, 7.x and 8.x ($vote is null before 7.3).
+     */
+    protected function voteOnAttribute(string $attribute, mixed $subject, TokenInterface $token, ?Vote $vote = null): bool
+    {
+        $order = $this->orders->findAccessView($subject);
+        if ($order === null) {
+            $vote?->addReason(sprintf('Order %s not found', $subject));
+
             return false;
         }
 
-        /** @var Order $order */
-        $order = $subject;
+        $isOwner = $order->customerId === $token->getUserIdentifier();
 
         return match ($attribute) {
-            self::VIEW => $this->canView($order, $user),
-            self::EDIT => $this->canEdit($order, $user),
-            self::CANCEL => $this->canCancel($order, $user),
+            self::VIEW => $isOwner || $this->accessDecisionManager->decide($token, ['ROLE_ORDER_VIEW']),
+            self::EDIT => $this->canEdit($order, $isOwner, $vote),
+            self::CANCEL => $this->canCancel($order, $isOwner, $token),
             default => false,
         };
     }
 
-    private function canView(Order $order, UserInterface $user): bool
+    private function canEdit(OrderAccessView $order, bool $isOwner, ?Vote $vote): bool
     {
-        // Owner can always view their orders
-        if ($order->customerId() === $user->getUserIdentifier()) {
+        if ($order->status !== 'pending') {
+            $vote?->addReason('Only pending orders can be edited');
+
+            return false;
+        }
+
+        return $isOwner;
+    }
+
+    private function canCancel(OrderAccessView $order, bool $isOwner, TokenInterface $token): bool
+    {
+        if ($isOwner && $order->status === 'pending') {
             return true;
         }
 
-        // Staff with ORDER_VIEW role can view any order
-        return in_array('ROLE_ORDER_VIEW', $user->getRoles(), true);
-    }
-
-    private function canEdit(Order $order, UserInterface $user): bool
-    {
-        // Only owner can edit, and only if order is pending
-        return $order->customerId() === $user->getUserIdentifier()
-            && $order->status()->value === 'pending';
-    }
-
-    private function canCancel(Order $order, UserInterface $user): bool
-    {
-        // Owner can cancel pending orders
-        if ($order->customerId() === $user->getUserIdentifier() && $order->status()->value === 'pending') {
-            return true;
-        }
-
-        // Admin can cancel any non-delivered order
-        return in_array('ROLE_ADMIN', $user->getRoles(), true)
-            && $order->status()->value !== 'delivered';
+        // Admins can cancel any non-delivered order; decide() respects the role hierarchy
+        return $order->status !== 'delivered'
+            && $this->accessDecisionManager->decide($token, ['ROLE_ADMIN']);
     }
 }
 ```
+
+Use `AccessDecisionManagerInterface::decide()` (or `Security::isGranted()`) for role checks inside voters: `$user->getRoles()` ignores the role hierarchy.
 
 ## Controller Usage
 
 ```php
 #[Route('/{id}', methods: ['PUT'])]
-public function update(string $id, Request $request): JsonResponse
+#[IsGranted('ORDER_EDIT', subject: 'id')]
+public function update(string $id, #[MapRequestPayload] UpdateOrderRequest $request): JsonResponse
 {
-    $order = $this->queryBus->dispatch(new GetOrderById($id))
-        ->last(HandledStamp::class)?->getResult();
+    $this->commandBus->dispatch(new UpdateOrder($id, $request->note));
 
-    if ($order === null) {
-        return $this->error('Order not found', 404);
-    }
-
-    // Voter checks authorization
-    $this->denyAccessUnlessGranted(OrderVoter::EDIT, $order);
-
-    // Proceed with update
-    $this->commandBus->dispatch(new UpdateOrder($id, /* ... */));
-
-    return $this->noContent();
+    return $this->success(null);
 }
 ```
+
+A missing order makes the voter deny (403), which also avoids revealing which IDs exist. If the API must answer 404 instead, let the voter grant for unknown IDs (there is nothing to protect) and let the handler throw `OrderNotFoundException`, mapped to 404 by the exception subscriber.
 
 ## Testing Voters
 
 ```php
 namespace Tests\Unit\Infrastructure\Order\Security;
 
-use App\Domain\Order\Entity\Order;
+use App\Domain\Order\Port\OrderReadRepositoryInterface;
+use App\Domain\Order\ReadModel\OrderAccessView;
 use App\Infrastructure\Order\Security\OrderVoter;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Security\Core\Authentication\Token\UsernamePasswordToken;
+use Symfony\Component\Security\Core\Authorization\AccessDecisionManagerInterface;
 use Symfony\Component\Security\Core\Authorization\Voter\VoterInterface;
+use Symfony\Component\Security\Core\User\InMemoryUser;
 
 final class OrderVoterTest extends TestCase
 {
-    private OrderVoter $voter;
-
-    protected function setUp(): void
-    {
-        $this->voter = new OrderVoter();
-    }
-
     public function test_owner_can_view_their_order(): void
     {
-        $order = $this->createOrder('user-123');
-        $token = $this->createToken('user-123', ['ROLE_USER']);
+        $voter = $this->voterFor(new OrderAccessView('order-1', 'user-123', 'pending'));
 
-        $result = $this->voter->vote($token, $order, [OrderVoter::VIEW]);
+        $result = $voter->vote($this->token('user-123'), 'order-1', [OrderVoter::VIEW]);
 
-        $this->assertSame(VoterInterface::ACCESS_GRANTED, $result);
+        self::assertSame(VoterInterface::ACCESS_GRANTED, $result);
     }
 
     public function test_other_user_cannot_edit_order(): void
     {
-        $order = $this->createOrder('user-123');
-        $token = $this->createToken('user-456', ['ROLE_USER']);
+        $voter = $this->voterFor(new OrderAccessView('order-1', 'user-123', 'pending'));
 
-        $result = $this->voter->vote($token, $order, [OrderVoter::EDIT]);
+        $result = $voter->vote($this->token('user-456'), 'order-1', [OrderVoter::EDIT]);
 
-        $this->assertSame(VoterInterface::ACCESS_DENIED, $result);
+        self::assertSame(VoterInterface::ACCESS_DENIED, $result);
     }
 
-    private function createToken(string $userId, array $roles): UsernamePasswordToken
+    private function voterFor(OrderAccessView $view): OrderVoter
     {
-        $user = $this->createMock(UserInterface::class);
-        $user->method('getUserIdentifier')->willReturn($userId);
-        $user->method('getRoles')->willReturn($roles);
+        // createStub: return values only (PHPUnit 13 emits a notice for mocks without expectations)
+        $orders = $this->createStub(OrderReadRepositoryInterface::class);
+        $orders->method('findAccessView')->willReturn($view);
 
-        return new UsernamePasswordToken($user, 'main', $roles);
+        $adm = $this->createStub(AccessDecisionManagerInterface::class);
+        $adm->method('decide')->willReturn(false);
+
+        return new OrderVoter($orders, $adm);
     }
 
-    private function createOrder(string $customerId): Order
+    private function token(string $userIdentifier): UsernamePasswordToken
     {
-        // Use reflection or factory to create test order
+        $user = new InMemoryUser($userIdentifier, null, ['ROLE_USER']);
+
+        return new UsernamePasswordToken($user, 'api', $user->getRoles());
     }
 }
 ```
+
+`InMemoryUser` avoids mocking `UserInterface` and works on every supported version.
 
 ## API Key / Service Authentication
 
@@ -167,9 +184,9 @@ For machine-to-machine APIs, combine with custom authenticators:
 ```php
 #[Route('/api/webhooks/payment', methods: ['POST'])]
 #[IsGranted('ROLE_WEBHOOK')]
-public function handlePaymentWebhook(Request $request): JsonResponse
+public function handlePaymentWebhook(#[MapRequestPayload] PaymentWebhookRequest $request): JsonResponse
 {
-    // Authenticated via API key authenticator
+    // Authenticated via API key / signature authenticator
     // Authorized via ROLE_WEBHOOK
 }
 ```

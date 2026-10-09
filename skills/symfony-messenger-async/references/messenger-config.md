@@ -19,7 +19,9 @@ framework:
                 middleware:
                     - validation
             event.bus:
-                default_middleware: allow_no_handlers
+                default_middleware:
+                    enabled: true
+                    allow_no_handlers: true
                 middleware:
                     - validation
 
@@ -34,6 +36,7 @@ framework:
                     delay: 1000        # 1 second initial delay
                     multiplier: 2      # exponential backoff
                     max_delay: 60000   # max 60 seconds
+                    # jitter: 0.1      # Symfony 7.1+: randomize delays to avoid thundering herds
 
             async_priority_high:
                 dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
@@ -74,7 +77,20 @@ framework:
             # Low priority
             'App\Application\Analytics\Command\TrackEvent': async_priority_low
             'App\Application\Cleanup\Command\PurgeExpiredSessions': async_priority_low
+
+            # Domain events (always YAML: no Symfony attributes in Domain)
+            'App\Domain\User\Event\UserRegistered': async
+
+when@test:
+    framework:
+        messenger:
+            transports:
+                async: 'in-memory://'
+                async_priority_high: 'in-memory://'
+                async_priority_low: 'in-memory://'
 ```
+
+Symfony 7.2+ alternative for Application commands: `#[AsMessage('async_priority_high')]` on the class. YAML wins when both exist. Symfony 8.1 adds `PriorityStamp` (AMQP/Beanstalkd) as an alternative to separate priority transports.
 
 ## Transport DSN Options
 
@@ -101,6 +117,17 @@ php bin/console messenger:consume async --limit=100 --time-limit=3600
 # Multiple transports with priority
 php bin/console messenger:consume async_priority_high async async_priority_low --limit=100
 
+# All receivers except "failed" (Symfony 7.4+)
+php bin/console messenger:consume --all --exclude-receivers=failed --time-limit=3600
+
+# Queue sizes
+php bin/console messenger:stats
+
+# Graceful restart after deploy (workers finish the current message)
+php bin/console messenger:stop-workers
+```
+
+```ini
 # Supervisor configuration
 # /etc/supervisor/conf.d/messenger-worker.conf
 [program:messenger-worker]
@@ -109,7 +136,10 @@ numprocs=2
 autostart=true
 autorestart=true
 process_name=%(program_name)s_%(process_num)02d
+stopwaitsecs=20
 ```
+
+Always run `messenger:stop-workers` on deploy, otherwise workers keep executing the old code.
 
 ## Failed Message Management
 
@@ -126,6 +156,8 @@ php bin/console messenger:failed:retry
 # Remove a failed message
 php bin/console messenger:failed:remove 123
 ```
+
+Monitor the `failed` transport (e.g. alert when `messenger:stats` shows it non-empty). Make sure retries are only spent on transient errors: throw `Symfony\Component\Messenger\Exception\UnrecoverableMessageHandlingException` for errors that can never succeed (invalid data), so the message goes straight to `failed`.
 
 ## Custom Middleware
 

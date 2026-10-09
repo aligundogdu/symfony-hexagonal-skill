@@ -9,6 +9,9 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 
 trait ApiResponseTrait
 {
+    /**
+     * @param array<string, mixed>|null $extra
+     */
     protected function success(mixed $result = null, int $status = 200, ?array $extra = null): JsonResponse
     {
         return new JsonResponse([
@@ -19,17 +22,18 @@ trait ApiResponseTrait
         ], $status);
     }
 
+    /**
+     * @param array<string, list<string>>|null $details
+     * @param array<string, mixed>|null        $extra
+     */
     protected function error(
         string $message,
         int $status = 400,
-        ?string $code = null,
+        string $code = 'ERROR',
         ?array $details = null,
         ?array $extra = null,
     ): JsonResponse {
-        $error = ['message' => $message];
-        if ($code !== null) {
-            $error['code'] = $code;
-        }
+        $error = ['code' => $code, 'message' => $message];
         if ($details !== null) {
             $error['details'] = $details;
         }
@@ -42,6 +46,9 @@ trait ApiResponseTrait
         ], $status);
     }
 
+    /**
+     * @param list<mixed> $items
+     */
     protected function paginated(array $items, int $total, int $page, int $limit): JsonResponse
     {
         return $this->success($items, 200, [
@@ -49,7 +56,7 @@ trait ApiResponseTrait
                 'total' => $total,
                 'page' => $page,
                 'limit' => $limit,
-                'totalPages' => (int) ceil($total / $limit),
+                'totalPages' => $limit > 0 ? (int) ceil($total / $limit) : 0,
             ],
         ]);
     }
@@ -59,12 +66,43 @@ trait ApiResponseTrait
         return $this->success($result, 201);
     }
 
-    protected function noContent(): JsonResponse
+    protected function accepted(mixed $result = null): JsonResponse
     {
-        return $this->success(null, 204);
+        return $this->success($result, 202);
     }
 }
 ```
+
+`JsonResponse` serializes public properties of DTOs via `json_encode`. If DTOs contain `DateTimeImmutable` or need custom names, inject `SerializerInterface` and build the payload with `$serializer->normalize($result)` instead.
+
+## Request DTOs (Presentation)
+
+```php
+namespace App\Presentation\User\API\Request;
+
+use Symfony\Component\Validator\Constraints as Assert;
+
+final readonly class RegisterUserRequest
+{
+    public function __construct(
+        #[Assert\NotBlank]
+        #[Assert\Email]
+        public string $email = '',
+
+        #[Assert\NotBlank]
+        #[Assert\Length(min: 2, max: 100)]
+        public string $name = '',
+
+        #[Assert\NotBlank]
+        #[Assert\Length(min: 8)]
+        #[Assert\NotCompromisedPassword]
+        public string $password = '',
+    ) {
+    }
+}
+```
+
+Defaults let missing fields reach the validator as `''` (clear `NotBlank` violations) instead of a type error.
 
 ## Full Controller Example
 
@@ -75,11 +113,16 @@ use App\Application\User\Command\RegisterUser;
 use App\Application\User\Command\UpdateUserProfile;
 use App\Application\User\Query\GetUserById;
 use App\Application\User\Query\ListUsers;
+use App\Domain\Shared\ReadModel\Page;
 use App\Presentation\Shared\ApiResponseTrait;
+use App\Presentation\Shared\Bus\CommandBus;
+use App\Presentation\Shared\Bus\QueryBus;
+use App\Presentation\User\API\Request\ListUsersRequest;
+use App\Presentation\User\API\Request\RegisterUserRequest;
+use App\Presentation\User\API\Request\UpdateUserProfileRequest;
 use Symfony\Component\HttpFoundation\JsonResponse;
-use Symfony\Component\HttpFoundation\Request;
-use Symfony\Component\Messenger\MessageBusInterface;
-use Symfony\Component\Messenger\Stamp\HandledStamp;
+use Symfony\Component\HttpKernel\Attribute\MapQueryString;
+use Symfony\Component\HttpKernel\Attribute\MapRequestPayload;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Security\Http\Attribute\IsGranted;
 
@@ -89,79 +132,53 @@ final class UserController
     use ApiResponseTrait;
 
     public function __construct(
-        private readonly MessageBusInterface $commandBus,
-        private readonly MessageBusInterface $queryBus,
+        private readonly CommandBus $commandBus,
+        private readonly QueryBus $queryBus,
     ) {
     }
 
     #[Route('', methods: ['GET'])]
     #[IsGranted('ROLE_USER_LIST')]
-    public function list(Request $request): JsonResponse
-    {
-        $query = new ListUsers(
-            page: $request->query->getInt('page', 1),
-            limit: $request->query->getInt('limit', 20),
-            search: $request->query->get('search'),
-        );
+    public function list(
+        #[MapQueryString(validationFailedStatusCode: 422)] ListUsersRequest $request = new ListUsersRequest(),
+    ): JsonResponse {
+        /** @var Page<mixed> $page */
+        $page = $this->queryBus->ask(new ListUsers($request->page, $request->limit, $request->status, $request->search));
 
-        $result = $this->queryBus->dispatch($query)
-            ->last(HandledStamp::class)?->getResult();
-
-        return $this->paginated(
-            $result->items,
-            $result->total,
-            $result->page,
-            $result->limit,
-        );
+        return $this->paginated($page->items, $page->total, $page->page, $page->limit);
     }
 
-    #[Route('/{id}', methods: ['GET'])]
+    #[Route('/{id}', methods: ['GET'], requirements: ['id' => '[0-9a-f-]{36}'])]
     #[IsGranted('ROLE_USER_VIEW')]
     public function show(string $id): JsonResponse
     {
-        $result = $this->queryBus->dispatch(new GetUserById($id))
-            ->last(HandledStamp::class)?->getResult();
+        $user = $this->queryBus->ask(new GetUserById($id));
 
-        if ($result === null) {
+        if ($user === null) {
             return $this->error('User not found', 404, 'USER_NOT_FOUND');
         }
 
-        return $this->success($result);
+        return $this->success($user);
     }
 
     #[Route('', methods: ['POST'])]
     #[IsGranted('ROLE_USER_CREATE')]
-    public function create(Request $request): JsonResponse
+    public function create(#[MapRequestPayload] RegisterUserRequest $request): JsonResponse
     {
-        $data = json_decode($request->getContent(), true, 512, JSON_THROW_ON_ERROR);
-
-        $command = new RegisterUser(
-            email: $data['email'],
-            name: $data['name'],
-            password: $data['password'],
+        $userId = $this->commandBus->dispatch(
+            new RegisterUser($request->email, $request->name, $request->password),
         );
-
-        $userId = $this->commandBus->dispatch($command)
-            ->last(HandledStamp::class)?->getResult();
 
         return $this->created(['id' => $userId]);
     }
 
-    #[Route('/{id}', methods: ['PUT'])]
+    #[Route('/{id}', methods: ['PUT'], requirements: ['id' => '[0-9a-f-]{36}'])]
     #[IsGranted('ROLE_USER_EDIT')]
-    public function update(string $id, Request $request): JsonResponse
+    public function update(string $id, #[MapRequestPayload] UpdateUserProfileRequest $request): JsonResponse
     {
-        $data = json_decode($request->getContent(), true, 512, JSON_THROW_ON_ERROR);
+        $this->commandBus->dispatch(new UpdateUserProfile($id, $request->name, $request->bio));
 
-        $command = new UpdateUserProfile(
-            userId: $id,
-            name: $data['name'] ?? null,
-            bio: $data['bio'] ?? null,
-        );
-
-        $this->commandBus->dispatch($command);
-
-        return $this->noContent();
+        return $this->success(null);
     }
 }
 ```

@@ -190,4 +190,4 @@ QueryBuilder adds negligible overhead - the SQL generation happens once and can 
 Use `$queryBuilder->expr()` or DQL functions. For truly database-specific features, create a custom DQL function and register it in `doctrine.yaml`.
 
 ### "My query is too complex for QueryBuilder"
-DBAL QueryBuilder supports JOINs, subqueries, UNION (via `->add('select', ...)`), CTEs, and window functions. If you think QueryBuilder can't handle it, check the DBAL documentation first. In extremely rare edge cases, discuss with the team before resorting to native SQL.
+DBAL QueryBuilder supports JOINs, subqueries and expressions on every version; DBAL 4.x adds `union()` and common table expressions (`with()`) in its recent minor releases, so check the installed DBAL version's QueryBuilder before assuming a gap. For database-specific functions, register a custom DQL function. In extremely rare edge cases, discuss with the team before resorting to native SQL, and isolate it in one Infrastructure read adapter so reviewers can find it.

@@ -84,16 +84,16 @@ security:
 
 ## Full security.yaml
 
+The domain `User` is not a Symfony `UserInterface`. Infrastructure provides a small adapter + provider, so Domain stays framework-free.
+
 ```yaml
 security:
     password_hashers:
-        Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface: 'auto'
+        App\Infrastructure\User\Security\SecurityUser: 'auto'
 
     providers:
         app_user_provider:
-            entity:
-                class: App\Infrastructure\User\Persistence\SecurityUser
-                property: email
+            id: App\Infrastructure\User\Security\SecurityUserProvider
 
     firewalls:
         dev:
@@ -103,12 +103,14 @@ security:
         api:
             pattern: ^/api
             stateless: true
+            provider: app_user_provider
+            entry_point: App\Presentation\Shared\Security\ApiAuthenticationEntryPoint
             json_login:
                 check_path: /api/login
-            jwt: ~
-            # Or API token:
-            # custom_authenticator:
-            #     - App\Infrastructure\Shared\Security\ApiTokenAuthenticator
+            # Token auth, pick one:
+            # access_token:                       # built in since Symfony 6.2
+            #     token_handler: App\Infrastructure\Shared\Security\ApiTokenHandler
+            # jwt: ~                              # requires lexik/jwt-authentication-bundle
 
         main:
             lazy: true
@@ -123,6 +125,113 @@ security:
         # ... as above
 ```
 
+### Security User Adapter
+
+```php
+namespace App\Infrastructure\User\Security;
+
+use App\Domain\User\Entity\User;
+use Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface;
+use Symfony\Component\Security\Core\User\UserInterface;
+
+final readonly class SecurityUser implements UserInterface, PasswordAuthenticatedUserInterface
+{
+    /** @param list<string> $roles */
+    public function __construct(
+        private string $id,
+        private string $email,
+        private string $passwordHash,
+        private array $roles,
+    ) {
+    }
+
+    public static function fromDomain(User $user): self
+    {
+        // Map domain permissions to roles here if the domain models them (e.g. $user->roles())
+        return new self($user->id()->value, $user->email()->value, $user->passwordHash(), ['ROLE_USER']);
+    }
+
+    public function getUserIdentifier(): string
+    {
+        return $this->id; // stable ID, so voters can compare it with ownerId/customerId
+    }
+
+    public function getEmail(): string
+    {
+        return $this->email;
+    }
+
+    public function getRoles(): array
+    {
+        return array_values(array_unique([...$this->roles, 'ROLE_USER']));
+    }
+
+    public function getPassword(): string
+    {
+        return $this->passwordHash;
+    }
+
+    /**
+     * Required by UserInterface up to Symfony 7.x, deprecated since 7.3. Nothing to erase:
+     * plain passwords never live on this object.
+     */
+    public function eraseCredentials(): void
+    {
+    }
+}
+```
+
+```php
+namespace App\Infrastructure\User\Security;
+
+use App\Domain\User\Port\UserRepositoryInterface;
+use App\Domain\User\ValueObject\Email;
+use App\Domain\User\ValueObject\UserId;
+use Symfony\Component\Security\Core\Exception\UnsupportedUserException;
+use Symfony\Component\Security\Core\Exception\UserNotFoundException;
+use Symfony\Component\Security\Core\User\UserInterface;
+use Symfony\Component\Security\Core\User\UserProviderInterface;
+
+/** @implements UserProviderInterface<SecurityUser> */
+final readonly class SecurityUserProvider implements UserProviderInterface
+{
+    public function __construct(
+        private UserRepositoryInterface $users,
+    ) {
+    }
+
+    public function loadUserByIdentifier(string $identifier): UserInterface
+    {
+        // json_login sends the email; tokens/sessions carry the ID
+        $user = str_contains($identifier, '@')
+            ? $this->users->findByEmail(new Email($identifier))
+            : $this->users->findById(new UserId($identifier));
+
+        if ($user === null) {
+            throw new UserNotFoundException();
+        }
+
+        return SecurityUser::fromDomain($user);
+    }
+
+    public function refreshUser(UserInterface $user): UserInterface
+    {
+        if (!$user instanceof SecurityUser) {
+            throw new UnsupportedUserException($user::class);
+        }
+
+        return $this->loadUserByIdentifier($user->getUserIdentifier());
+    }
+
+    public function supportsClass(string $class): bool
+    {
+        return $class === SecurityUser::class;
+    }
+}
+```
+
+`json_login` uses the email as identifier while the session/token uses the ID returned by `getUserIdentifier()`; the provider accepts both.
+
 ## Checking Roles in Code
 
 ### In Controllers (prefer `#[IsGranted]`)
@@ -133,8 +242,11 @@ public function create(): JsonResponse { ... }
 
 ### In Services (via Security component)
 ```php
-use Symfony\Bundle\SecurityBundle\Security;
+use Symfony\Bundle\SecurityBundle\Security; // Symfony 6.2+
+use Symfony\Component\Security\Core\Exception\AccessDeniedException;
 
+// Infrastructure / Presentation only. Application code receives the needed facts
+// (e.g. the current user ID) through the command, not through Security.
 final readonly class SomeService
 {
     public function __construct(
@@ -151,26 +263,32 @@ final readonly class SomeService
 }
 ```
 
-### In Voters (for resource-based checks)
+### Resource-based checks
 ```php
-$this->denyAccessUnlessGranted('EDIT', $order);
+#[IsGranted('ORDER_EDIT', subject: 'id')]
 ```
 
 ## Multi-Tenant Roles
 
-For SaaS applications with organization-scoped roles:
+For SaaS applications with organization-scoped roles, load memberships through a read port:
 
 ```php
-// Custom voter that checks organization membership
+/** @extends Voter<string, string> */
 final class OrganizationVoter extends Voter
 {
-    protected function voteOnAttribute(string $attribute, mixed $subject, TokenInterface $token): bool
-    {
-        $user = $token->getUser();
-        $organization = $subject;
+    public function __construct(
+        private readonly MembershipReadRepositoryInterface $memberships,
+    ) {
+    }
 
-        // Check if user belongs to this organization with the required role
-        return $user->hasOrganizationRole($organization->id(), $attribute);
+    protected function supports(string $attribute, mixed $subject): bool
+    {
+        return str_starts_with($attribute, 'ORG_') && is_string($subject); // subject = organization ID
+    }
+
+    protected function voteOnAttribute(string $attribute, mixed $subject, TokenInterface $token, ?Vote $vote = null): bool
+    {
+        return $this->memberships->hasRole($token->getUserIdentifier(), $subject, $attribute);
     }
 }
 ```

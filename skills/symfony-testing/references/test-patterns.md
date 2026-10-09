@@ -9,6 +9,7 @@ Replace infrastructure adapters with in-memory versions for fast, isolated tests
 ```php
 namespace Tests\Support\Adapter;
 
+use App\Domain\Shared\Event\DomainEvent;
 use App\Domain\User\Entity\User;
 use App\Domain\User\Port\UserRepositoryInterface;
 use App\Domain\User\ValueObject\Email;
@@ -19,9 +20,13 @@ final class InMemoryUserRepository implements UserRepositoryInterface
     /** @var array<string, User> */
     private array $users = [];
 
+    /** @var list<DomainEvent> events "dispatched" by save(), for assertions */
+    public array $releasedEvents = [];
+
     public function save(User $user): void
     {
-        $this->users[(string) $user->id()] = $user;
+        $this->users[$user->id()->value] = $user;
+        array_push($this->releasedEvents, ...$user->pullDomainEvents());
     }
 
     public function findById(UserId $id): ?User
@@ -32,10 +37,11 @@ final class InMemoryUserRepository implements UserRepositoryInterface
     public function findByEmail(Email $email): ?User
     {
         foreach ($this->users as $user) {
-            if ((string) $user->email() === $email->value) {
+            if ($user->email()->equals($email)) {
                 return $user;
             }
         }
+
         return null;
     }
 
@@ -46,16 +52,39 @@ final class InMemoryUserRepository implements UserRepositoryInterface
 
     public function remove(User $user): void
     {
-        unset($this->users[(string) $user->id()]);
+        unset($this->users[$user->id()->value]);
     }
 
-    /** @return User[] */
+    /** @return list<User> */
     public function all(): array
     {
         return array_values($this->users);
     }
 }
 ```
+
+### Other fakes
+
+```php
+namespace Tests\Support\Adapter;
+
+use App\Domain\User\Port\PasswordHasherInterface;
+
+final class FakePasswordHasher implements PasswordHasherInterface
+{
+    public function hash(string $plainPassword): string
+    {
+        return 'hashed:' . $plainPassword;
+    }
+
+    public function verify(string $hash, string $plainPassword): bool
+    {
+        return $hash === 'hashed:' . $plainPassword;
+    }
+}
+```
+
+`SequentialIdGenerator` is shown in the domain-modeling skill (`value-object-patterns.md`).
 
 ## Entity Test Patterns
 
@@ -64,38 +93,35 @@ final class InMemoryUserRepository implements UserRepositoryInterface
 ```php
 final class UserTest extends TestCase
 {
+    private const USER_ID = '0199a3c2-7b1e-7c3a-9f00-000000000001';
+
     public function test_user_is_registered(): void
     {
-        $userId = new UserId('550e8400-e29b-41d4-a716-446655440000');
-        $email = new Email('john@example.com');
+        $userId = new UserId(self::USER_ID);
 
-        $user = User::register($userId, $email, 'John Doe');
+        $user = User::register($userId, new Email('john@example.com'), 'John Doe', 'hash', new \DateTimeImmutable());
 
-        $this->assertTrue($userId->equals($user->id()));
-        $this->assertSame('John Doe', $user->name());
+        self::assertTrue($userId->equals($user->id()));
+        self::assertSame('John Doe', $user->name());
     }
 
     public function test_user_registration_records_event(): void
     {
-        $user = User::register(
-            UserId::generate(),
-            new Email('john@example.com'),
-            'John Doe',
-        );
+        $user = User::register(new UserId(self::USER_ID), new Email('john@example.com'), 'John Doe', 'hash', new \DateTimeImmutable());
 
         $events = $user->pullDomainEvents();
-        $this->assertCount(1, $events);
-        $this->assertInstanceOf(UserRegistered::class, $events[0]);
+
+        self::assertCount(1, $events);
+        self::assertInstanceOf(UserRegistered::class, $events[0]);
     }
 
     public function test_domain_events_are_cleared_after_pull(): void
     {
-        $user = User::register(UserId::generate(), new Email('test@test.com'), 'Test');
+        $user = User::register(new UserId(self::USER_ID), new Email('test@test.com'), 'Test', 'hash', new \DateTimeImmutable());
 
         $user->pullDomainEvents();
-        $events = $user->pullDomainEvents();
 
-        $this->assertEmpty($events);
+        self::assertSame([], $user->pullDomainEvents());
     }
 }
 ```
@@ -107,78 +133,101 @@ final class OrderTest extends TestCase
 {
     public function test_cannot_cancel_delivered_order(): void
     {
-        $order = $this->createDeliveredOrder();
+        $order = $this->deliveredOrder();
 
-        $this->expectException(OrderAlreadyCancelledException::class);
-        $order->cancel('Changed my mind');
+        $this->expectException(InvalidOrderTransitionException::class);
+        $order->cancel('Changed my mind', new \DateTimeImmutable());
     }
 
     public function test_adding_item_to_pending_order(): void
     {
-        $order = Order::place(OrderId::generate(), 'customer-1');
+        $now = new \DateTimeImmutable();
+        $order = Order::place(new OrderId('0199a3c2-7b1e-7c3a-9f00-000000000002'), 'customer-1', 'EUR', $now);
 
-        $order->addItem('product-1', 2, Money::fromFloat(9.99, 'EUR'));
+        $order->addItem('product-1', 2, new Money(999, 'EUR'), $now);
 
-        $events = $order->pullDomainEvents();
-        $this->assertCount(2, $events); // OrderPlaced + OrderItemAdded
+        self::assertCount(2, $order->pullDomainEvents()); // OrderPlaced + OrderItemAdded
+        self::assertEquals(new Money(1998, 'EUR'), $order->totalAmount());
     }
 }
 ```
 
 ## Handler Test Patterns
 
-### Command Handler with Mock
+### Command Handler with Stubs (PHPUnit 10-13)
+
+Use `createStub()` when you only configure return values, `createMock()` only when you assert calls with `expects()`. PHPUnit 13 reports a notice for mocks that never get an expectation.
 
 ```php
 final class RegisterUserHandlerTest extends TestCase
 {
-    private UserRepositoryInterface&MockObject $repository;
-    private RegisterUserHandler $handler;
-
-    protected function setUp(): void
-    {
-        $this->repository = $this->createMock(UserRepositoryInterface::class);
-        $this->handler = new RegisterUserHandler($this->repository);
-    }
-
-    public function test_registers_new_user(): void
-    {
-        $this->repository->method('existsByEmail')->willReturn(false);
-        $this->repository->expects($this->once())->method('save');
-
-        $result = ($this->handler)(new RegisterUser('test@example.com', 'Test', 'password'));
-
-        $this->assertNotEmpty($result);
-    }
-
     public function test_rejects_duplicate_email(): void
     {
-        $this->repository->method('existsByEmail')->willReturn(true);
+        $users = $this->createStub(UserRepositoryInterface::class);
+        $users->method('existsByEmail')->willReturn(true);
+
+        $handler = new RegisterUserHandler($users, new FakePasswordHasher(), new SequentialIdGenerator());
 
         $this->expectException(UserAlreadyExistsException::class);
-        ($this->handler)(new RegisterUser('existing@example.com', 'Test', 'password'));
+        $handler(new RegisterUser('existing@example.com', 'Test', 'password'));
+    }
+
+    public function test_saves_exactly_once(): void
+    {
+        $users = $this->createMock(UserRepositoryInterface::class);
+        $users->method('existsByEmail')->willReturn(false);
+        $users->expects($this->once())->method('save');
+
+        $handler = new RegisterUserHandler($users, new FakePasswordHasher(), new SequentialIdGenerator());
+        $handler(new RegisterUser('new@example.com', 'Test', 'password'));
     }
 }
 ```
 
-### Command Handler with In-Memory Adapter
+### Command Handler with In-Memory Adapter (preferred)
 
 ```php
 final class RegisterUserHandlerTest extends TestCase
 {
     public function test_registers_and_persists_user(): void
     {
-        $repository = new InMemoryUserRepository();
-        $handler = new RegisterUserHandler($repository);
+        $users = new InMemoryUserRepository();
+        $handler = new RegisterUserHandler($users, new FakePasswordHasher(), new SequentialIdGenerator());
 
-        $userId = ($handler)(new RegisterUser('test@example.com', 'Test', 'password'));
+        $userId = $handler(new RegisterUser('test@example.com', 'Test', 'password'));
 
-        $user = $repository->findById(new UserId($userId));
-        $this->assertNotNull($user);
-        $this->assertSame('Test', $user->name());
+        $user = $users->findById(new UserId($userId));
+        self::assertNotNull($user);
+        self::assertSame('Test', $user->name());
+        self::assertInstanceOf(UserRegistered::class, $users->releasedEvents[0]);
     }
 }
 ```
+
+## Asserting Async Messages
+
+With `async: 'in-memory://'` under `when@test` (see messenger config), messages routed async are captured instead of sent:
+
+```php
+use Symfony\Component\Messenger\Transport\InMemory\InMemoryTransport;
+
+final class RegisterUserFlowTest extends KernelTestCase
+{
+    public function test_user_registered_event_is_queued(): void
+    {
+        self::bootKernel();
+        // dispatch the command through the real bus ...
+
+        /** @var InMemoryTransport $transport */
+        $transport = self::getContainer()->get('messenger.transport.async');
+
+        self::assertCount(1, $transport->getSent());
+        self::assertInstanceOf(UserRegistered::class, $transport->getSent()[0]->getMessage());
+    }
+}
+```
+
+`zenstruck/messenger-test` offers a fluent alternative (`$this->transport('async')->queue()->assertContains(UserRegistered::class)`); check its compatibility with your Symfony/PHPUnit versions before adding it.
 
 ## Functional Test Patterns
 
@@ -190,49 +239,51 @@ final class UserControllerTest extends WebTestCase
     public function test_create_user_returns_201(): void
     {
         $client = static::createClient();
-        $client->request('POST', '/api/users', [], [], [
-            'CONTENT_TYPE' => 'application/json',
-            'HTTP_AUTHORIZATION' => 'Bearer ' . $this->getToken('admin'),
-        ], json_encode([
+        $client->jsonRequest('POST', '/api/users', [
             'email' => 'new@example.com',
             'name' => 'New User',
             'password' => 'SecurePass123',
-        ]));
+        ], ['HTTP_AUTHORIZATION' => 'Bearer ' . $this->tokenFor('admin')]);
 
-        $this->assertResponseStatusCodeSame(201);
+        self::assertResponseStatusCodeSame(201);
 
-        $data = json_decode($client->getResponse()->getContent(), true);
-        $this->assertArrayHasKey('result', $data);
-        $this->assertArrayHasKey('id', $data['result']);
-        $this->assertNull($data['error']);
-        $this->assertSame(201, $data['status']);
+        $data = json_decode((string) $client->getResponse()->getContent(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertArrayHasKey('id', $data['result']);
+        self::assertNull($data['error']);
+        self::assertSame(201, $data['status']);
     }
 
     public function test_create_user_with_invalid_email_returns_422(): void
     {
         $client = static::createClient();
-        $client->request('POST', '/api/users', [], [], [
-            'CONTENT_TYPE' => 'application/json',
-            'HTTP_AUTHORIZATION' => 'Bearer ' . $this->getToken('admin'),
-        ], json_encode([
+        $client->jsonRequest('POST', '/api/users', [
             'email' => 'not-an-email',
             'name' => 'Test',
             'password' => 'SecurePass123',
-        ]));
+        ], ['HTTP_AUTHORIZATION' => 'Bearer ' . $this->tokenFor('admin')]);
 
-        $this->assertResponseStatusCodeSame(422);
+        self::assertResponseStatusCodeSame(422);
 
-        $data = json_decode($client->getResponse()->getContent(), true);
-        $this->assertNull($data['result']);
-        $this->assertNotNull($data['error']);
+        $data = json_decode((string) $client->getResponse()->getContent(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertNull($data['result']);
+        self::assertSame('VALIDATION_ERROR', $data['error']['code']);
+        self::assertArrayHasKey('email', $data['error']['details']);
     }
 
-    public function test_unauthorized_access_returns_403(): void
+    public function test_unauthenticated_access_returns_401(): void
     {
         $client = static::createClient();
         $client->request('GET', '/api/users');
 
-        $this->assertResponseStatusCodeSame(401);
+        self::assertResponseStatusCodeSame(401);
+    }
+
+    public function test_missing_role_returns_403(): void
+    {
+        $client = static::createClient();
+        $client->request('GET', '/api/users', server: ['HTTP_AUTHORIZATION' => 'Bearer ' . $this->tokenFor('basic-user')]);
+
+        self::assertResponseStatusCodeSame(403);
     }
 }
 ```
@@ -248,36 +299,42 @@ use App\Domain\User\ValueObject\UserId;
 
 final class UserBuilder
 {
-    private UserId $id;
-    private Email $email;
+    private string $id = '0199a3c2-7b1e-7c3a-9f00-000000000001';
+    private string $email = 'test@example.com';
     private string $name = 'Test User';
-
-    public function __construct()
-    {
-        $this->id = UserId::generate();
-        $this->email = new Email('test@example.com');
-    }
 
     public static function aUser(): self
     {
         return new self();
     }
 
+    public function withId(string $id): self
+    {
+        $clone = clone $this;
+        $clone->id = $id;
+
+        return $clone;
+    }
+
     public function withEmail(string $email): self
     {
-        $this->email = new Email($email);
-        return $this;
+        $clone = clone $this;
+        $clone->email = $email;
+
+        return $clone;
     }
 
     public function withName(string $name): self
     {
-        $this->name = $name;
-        return $this;
+        $clone = clone $this;
+        $clone->name = $name;
+
+        return $clone;
     }
 
     public function build(): User
     {
-        return User::register($this->id, $this->email, $this->name);
+        return User::register(new UserId($this->id), new Email($this->email), $this->name, 'hash', new \DateTimeImmutable());
     }
 }
 

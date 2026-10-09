@@ -1,13 +1,15 @@
-# Symfony Hexagonal Architecture — Claude Code Plugin
+# Symfony Hexagonal Architecture - Claude Code Plugin
 
 A Claude Code plugin that enforces hexagonal architecture (ports & adapters) in Symfony projects. Works with both **new projects** (full scaffolding) and **existing projects** (progressive, module-by-module refactoring).
 
-No slash commands needed — skills and agents activate automatically based on conversation context.
+- **Version-aware**: supports Symfony **6.4 LTS, 7.4 LTS and 8.x**. The plugin detects your installed Symfony / PHP / Doctrine / PHPUnit versions and generates code that runs on them, with fallbacks for older versions.
+- **Zero commands to learn**: skills and agents activate automatically from the conversation.
 
 ---
 
 ## Table of Contents
 
+- [Compatibility](#compatibility)
 - [Installation](#installation)
 - [Getting Started with a New Project](#getting-started-with-a-new-project)
 - [Adding to an Existing Project](#adding-to-an-existing-project)
@@ -21,58 +23,112 @@ No slash commands needed — skills and agents activate automatically based on c
 
 ---
 
+## Compatibility
+
+| | Symfony 6.4 LTS | Symfony 7.4 LTS | Symfony 8.x |
+|---|---|---|---|
+| PHP | 8.1+ (8.2+ for `readonly` classes) | 8.2+ | 8.4+ |
+| Doctrine ORM / DBAL | 2.x-3.x / 3.x-4.x | 3.x / 4.x | 3.4+ / 4.x |
+| PHPUnit | 10-11 | 11-12 | 12-13 |
+| Status | supported (bugfix support ends Nov 2026) | recommended | supported |
+
+How it works:
+
+1. On session start (plugin install), a hook prints a **Detected Stack** block read from `composer.lock`. Non-Symfony projects get nothing, so the plugin never affects other repositories.
+2. Generated code defaults to APIs available on **all** supported versions (PHP 8.2 + Symfony 6.4).
+3. Newer features (`DeduplicateStamp` 7.3+, `#[ExtendsValidationFor]` 7.4+, PHP 8.4 `private(set)`, Doctrine ORM 3.7 `OffsetPaginator`, ...) are used only when your versions allow them, with the fallback documented next to each one.
+4. APIs removed in Symfony 8 (`Request::get()`, constraint option arrays, XML service config, Doctrine annotations) are never generated, and the agents flag them in existing code.
+
+The full matrix lives in [`skills/symfony-hexagonal-architecture/references/version-compatibility.md`](skills/symfony-hexagonal-architecture/references/version-compatibility.md).
+
+---
+
 ## Installation
 
-### Option 1: Add to a Specific Project (Recommended)
+Requires [Claude Code](https://code.claude.com). Pick one option.
 
-Copy the skills, agents, and architecture rules into your Symfony project's `.claude/` directory:
+### Option 1: Plugin (recommended, 2 commands)
+
+Inside Claude Code:
+
+```
+/plugin marketplace add aligundogdu/symfony-hexagonal-skill
+/plugin install symfony-hexagonal@symfony-hexagonal-skill
+```
+
+Or from your shell:
 
 ```bash
-# Clone the repository
+claude plugin marketplace add aligundogdu/symfony-hexagonal-skill
+claude plugin install symfony-hexagonal@symfony-hexagonal-skill            # --scope user (default) | project | local
+```
+
+This installs all skills, both agents and the SessionStart hook that loads the architecture rules (only in Symfony projects). Restart the session afterwards.
+
+Update later with `/plugin marketplace update symfony-hexagonal-skill` (or `claude plugin update symfony-hexagonal@symfony-hexagonal-skill`).
+
+### Option 2: Plugin for the whole team (auto-enabled per project)
+
+Commit this to your Symfony project's `.claude/settings.json`:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "symfony-hexagonal-skill": {
+      "source": { "source": "github", "repo": "aligundogdu/symfony-hexagonal-skill" }
+    }
+  },
+  "enabledPlugins": {
+    "symfony-hexagonal@symfony-hexagonal-skill": true
+  }
+}
+```
+
+When teammates open the project and trust the folder, Claude Code offers to install the marketplace and plugin. If a teammate sees "enabled in project settings but isn't installed", they run the two commands from Option 1 once.
+
+### Option 3: Copy into a project (no plugin system)
+
+```bash
 git clone https://github.com/aligundogdu/symfony-hexagonal-skill.git /tmp/hex-skill
 
-# Create the required directories in your project
 mkdir -p your-project/.claude/skills your-project/.claude/agents
-
-# Copy skills and agents
 cp -r /tmp/hex-skill/skills/* your-project/.claude/skills/
 cp -r /tmp/hex-skill/agents/* your-project/.claude/agents/
 
-# Add architecture rules to your project's CLAUDE.md
-cat /tmp/hex-skill/CLAUDE.md >> your-project/CLAUDE.md
+# The rules are normally injected by the plugin hook; without the plugin, append them to CLAUDE.md
+cat /tmp/hex-skill/rules/hexagonal-rules.md >> your-project/CLAUDE.md
 
-# Clean up
 rm -rf /tmp/hex-skill
 ```
 
-You can commit the `.claude/skills/` and `.claude/agents/` directories so the entire team shares the same rules, or add them to `.gitignore` to keep it local.
+Commit `.claude/skills/` and `.claude/agents/` to share them with the team.
 
-### Option 2: Symlink (for Development / Multi-Project Use)
-
-If you want to use the plugin across multiple projects without copying:
+### Option 4: Symlink (develop the plugin / multi-project)
 
 ```bash
-# Clone once
 git clone https://github.com/aligundogdu/symfony-hexagonal-skill.git ~/symfony-hexagonal-skill
 
-# In each Symfony project, symlink the skills and agents
+# In each Symfony project
 mkdir -p .claude
 ln -s ~/symfony-hexagonal-skill/skills .claude/skills
 ln -s ~/symfony-hexagonal-skill/agents .claude/agents
+echo '@~/symfony-hexagonal-skill/rules/hexagonal-rules.md' >> CLAUDE.md   # CLAUDE.md import
 
-# Copy CLAUDE.md rules into your project (merge manually if you already have one)
-cp ~/symfony-hexagonal-skill/CLAUDE.md ./CLAUDE.md
+# Or load the checkout as a plugin for one session (includes the hook):
+claude --plugin-dir ~/symfony-hexagonal-skill
 ```
 
 ### Verify Installation
 
-After installation, start Claude Code in your project directory and ask:
+In your Symfony project, start Claude Code and ask:
 
 ```
 > Analyze the project structure for hexagonal architecture compliance
 ```
 
-If installed correctly, the **hexagonal-architect** agent will scan your project and return a compliance report. Skills activate automatically based on conversation context - no slash commands needed.
+The **hexagonal-architect** agent reports your detected stack (Symfony / PHP / Doctrine versions) and a compliance score. With the plugin install, `/plugin` lists `symfony-hexagonal` as enabled and skills appear as `symfony-hexagonal:<skill>`.
+
+Plugin authors can validate the manifest with `claude plugin validate .` in this repository.
 
 ---
 
@@ -110,14 +166,14 @@ Every new module, feature, and endpoint follows the same hexagonal rules automat
 
 ## Adding to an Existing Project
 
-This is where the plugin truly shines. Most Symfony projects already have code — traditional MVC controllers, Doctrine entities with annotations, services calling repositories directly. **You don't have to rewrite everything.**
+This is where the plugin truly shines. Most Symfony projects already have code - traditional MVC controllers, Doctrine entities with annotations, services calling repositories directly. **You don't have to rewrite everything.**
 
 ### How it works
 
-1. **Install the plugin** — nothing in your codebase changes
-2. **Keep working as usual** — ask Claude to add features, fix bugs, modify endpoints
-3. **The plugin detects non-hexagonal code** — when your request touches a module that doesn't follow hexagonal patterns, it will ask you what to do
-4. **You choose the pace** — refactor now, later, or not at all
+1. **Install the plugin** - nothing in your codebase changes
+2. **Keep working as usual** - ask Claude to add features, fix bugs, modify endpoints
+3. **The plugin detects non-hexagonal code** - when your request touches a module that doesn't follow hexagonal patterns, it will ask you what to do
+4. **You choose the pace** - refactor now, later, or not at all
 
 ### What it looks like in practice
 
@@ -130,12 +186,12 @@ ServiceEntityRepository, and a ProductController with business logic).
 
 I can proceed in one of three ways:
 
-1. Refactor first — Migrate the Product module to hexagonal architecture,
+1. Refactor first - Migrate the Product module to hexagonal architecture,
    then add the featured flag
-2. Hexagonal for new code only — Add the featured flag using hexagonal
+2. Hexagonal for new code only - Add the featured flag using hexagonal
    patterns (Command/Handler, port interface) while leaving existing
    Product code as-is
-3. Keep current structure — Add the featured flag in the existing
+3. Keep current structure - Add the featured flag in the existing
    traditional style
 
 Which do you prefer?
@@ -154,7 +210,7 @@ Progressive refactoring is the plugin's strategy for migrating existing projects
 | Big-Bang Rewrite | Progressive Refactoring |
 |---|---|
 | Weeks of work before any value | Value from day one |
-| High risk — everything changes at once | Low risk — one module at a time |
+| High risk - everything changes at once | Low risk - one module at a time |
 | Blocks feature development | Happens alongside feature development |
 | Merge conflicts across the team | Minimal disruption to other developers |
 | All-or-nothing commitment | Try it on one module, expand if you like it |
@@ -178,12 +234,13 @@ Step 2: Application Layer
   └─ Create DTOs (for input/output boundaries)
 
 Step 3: Infrastructure Layer
-  └─ Move Doctrine mapping to XML/separate config
+  └─ Move Doctrine mapping to XML (unblocks Doctrine ORM 3)
   └─ Create repository adapters (implement port interfaces)
   └─ Bind ports to adapters in services.yaml
 
 Step 4: Presentation Layer
   └─ Thin out controllers (dispatch commands/queries only)
+  └─ Map input with #[MapRequestPayload] DTOs
   └─ Apply standard JSON response format
   └─ Add #[IsGranted] to every endpoint
 ```
@@ -192,10 +249,10 @@ Each step results in working code. You can stop after any step and continue late
 
 ### What Doesn't Get Touched
 
-- **Modules you're not working on** — The plugin never suggests refactoring code outside your current scope
-- **Configuration files** — Unless directly related to the module being refactored
-- **Tests** — Existing tests continue to work; new tests follow the hexagonal test structure
-- **Third-party bundles** — No changes to vendor code or bundle configuration
+- **Modules you're not working on** - The plugin never suggests refactoring code outside your current scope
+- **Configuration files** - Unless directly related to the module being refactored
+- **Tests** - Existing tests continue to work; new tests follow the hexagonal test structure
+- **Third-party bundles** - No changes to vendor code or bundle configuration
 
 ### Living with Mixed Architecture
 
@@ -230,11 +287,11 @@ Side-effects (sending emails, updating caches, notifying systems) are triggered 
 
 ### Additional Standards
 
-- **API responses**: Standardized JSON payload `{result, error, extra, status}` with debug mode
+- **API responses**: Standardized JSON payload `{result, error, extra, status}` with debug mode, Messenger exceptions unwrapped to proper 4xx codes
 - **No cron jobs**: Symfony Messenger async + Scheduler component
 - **Security**: Every endpoint requires `#[IsGranted]` or a Voter
-- **Quality**: PHPStan level 8+, DTOs at every boundary, 3-layer validation
-- **Async resilience**: Idempotency keys, retry with backoff, failure transport
+- **Quality**: PHPStan level 8+ (PHPStan 2.x), deptrac layer rules, DTOs at every boundary, 3-layer validation
+- **Async resilience**: Idempotency keys, retry with backoff, failure transport, domain events released only after the transaction commits
 - **No native SQL**: Raw/native SQL is forbidden in application code. Use Doctrine QueryBuilder (ORM or DBAL), DQL, or Criteria API. Only Doctrine Migrations may use `$this->addSql()`
 
 ---
@@ -250,7 +307,8 @@ src/
 │   ├── ValueObject/       # Immutable, self-validating value objects
 │   ├── Event/             # Domain events (past-tense naming)
 │   ├── Exception/         # Domain-specific exceptions
-│   └── Port/              # Interfaces for external dependencies
+│   ├── Port/              # Interfaces for external dependencies
+│   └── ReadModel/         # (optional) views returned by read ports
 │
 ├── Application/{Module}/
 │   ├── Command/           # Write operation DTOs + Handlers
@@ -259,7 +317,8 @@ src/
 │   └── EventHandler/      # Domain event side-effect handlers
 │
 ├── Infrastructure/{Module}/
-│   ├── Persistence/       # Doctrine repositories + ORM mappings
+│   ├── Persistence/       # Doctrine repositories + XML mappings
+│   ├── Security/          # Voters, user provider
 │   ├── Messaging/         # Message transport adapters
 │   └── ExternalService/   # HTTP clients, third-party APIs
 │
@@ -282,20 +341,20 @@ tests/
 
 ## Skills Reference
 
-Skills activate automatically based on your conversation context. No slash commands needed.
+Skills activate automatically based on your conversation context. With the plugin they are namespaced, e.g. `/symfony-hexagonal:symfony-cqrs-handlers`.
 
 | Skill | Triggers On | What It Does |
 |-------|-------------|--------------|
-| **hexagonal-architecture** | architecture, module, layer, scaffold, project structure | Project setup, module scaffolding, layer rules |
-| **domain-modeling** | entity, value object, domain event, aggregate | Entity patterns, value objects, domain events |
-| **cqrs-handlers** | command, query, handler, CQRS, use case | Command/Query creation, handler patterns, bus config |
-| **ports-adapters** | port, adapter, interface, DI, autowiring | Port interfaces, adapter implementations, DI binding |
-| **api-response** | API, endpoint, controller, response, REST | JSON payload standard, exception handling |
-| **messenger-async** | messenger, async, queue, retry, scheduler | Async processing, idempotency, Symfony Scheduler |
-| **security-voters** | security, voter, role, authorization | Voter patterns, role hierarchy, access control |
-| **doctrine-persistence** | doctrine, repository, database, mapping, migration | Repository adapters, XML mapping, migration workflow |
-| **validation** | validation, validator, constraint | 3-layer validation (presentation, application, domain) |
-| **testing** | test, PHPUnit, TDD, unit test, mock | Test organization, TDD workflow, in-memory adapters |
+| **symfony-hexagonal-architecture** | architecture, module, layer, scaffold, version, upgrade | Project setup, module scaffolding, layer rules, deptrac, **version compatibility matrix** |
+| **symfony-domain-modeling** | entity, value object, domain event, aggregate | Entities, value objects, domain events, ID generator port, PHP 8.2-8.5 modeling |
+| **symfony-cqrs-handlers** | command, query, handler, CQRS, use case | Commands/queries, handlers, three buses, typed bus wrappers, read ports + pagination |
+| **symfony-ports-adapters** | port, adapter, interface, DI, autowiring | Port interfaces, adapters, `services.yaml` / `#[AsAlias]`, decorators, test adapters |
+| **symfony-api-response** | API, endpoint, controller, response, REST | JSON payload standard, `#[MapRequestPayload]`, exception subscriber |
+| **symfony-messenger-async** | messenger, async, queue, retry, scheduler, cron | Async processing, idempotency, `DeduplicateStamp`, Symfony Scheduler |
+| **symfony-security-voters** | security, voter, role, authorization | `#[IsGranted]`, voters with read ports, role hierarchy, security user adapter |
+| **symfony-doctrine-persistence** | doctrine, repository, database, mapping, migration | Repository adapters, XML mapping, custom types, native lazy objects, no native SQL |
+| **symfony-validation** | validation, validator, constraint | 3-layer validation, named-argument constraints, `#[ExtendsValidationFor]` |
+| **symfony-testing** | test, PHPUnit, TDD, mock, PHPStan | PHPUnit 10-13, in-memory adapters, stubs vs mocks, Foundry 2, PHPStan 2 |
 
 Each skill includes reference files with complete code examples, configuration snippets, and patterns ready to use.
 
@@ -305,20 +364,21 @@ Each skill includes reference files with complete code examples, configuration s
 
 | Agent | Model | Purpose |
 |-------|-------|---------|
-| **hexagonal-architect** | Sonnet | Analyzes project structure, designs module architecture, produces compliance scores (0-100). Read-only. |
-| **hexagonal-reviewer** | Sonnet | Reviews code changes against all rules. Reports violations as CRITICAL / WARNING / INFO. Read-only. |
+| **hexagonal-architect** | Sonnet | Detects the stack, analyzes structure, designs modules, produces compliance scores (0-100) and upgrade notes. Read-only. |
+| **hexagonal-reviewer** | Sonnet | Reviews changes against all rules plus version hygiene. Reports CRITICAL / WARNING / INFO with a verdict. Read-only. |
+
+With the plugin they appear as `symfony-hexagonal:hexagonal-architect` and `symfony-hexagonal:hexagonal-reviewer`.
 
 ### Usage
-
-Agents are invoked through natural conversation:
 
 ```
 > Review my recent changes for hexagonal compliance
 > Analyze the project structure and give me a compliance score
 > Design the architecture for a Notification module
+> What breaks if we upgrade this project from Symfony 7.4 to 8.1?
 ```
 
-Both agents are **read-only** — they analyze and report but never modify your code.
+Both agents are **read-only**: they analyze and report but never modify your code.
 
 ---
 
@@ -353,10 +413,15 @@ Both agents are **read-only** — they analyze and report but never modify your 
 ```
 > Show me how to create a value object for Money with currency support
 > How should I configure Symfony Messenger for async order processing?
-> Create a Voter for order authorization — owner can edit, admin can delete
+> Create a Voter for order authorization: owner can edit, admin can delete
+> We are on Symfony 6.4: how do I deduplicate queued messages?
 ```
 
 ---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
